@@ -1,0 +1,6 @@
+.conda_env/
+.env
+.ipynb_checkpoints/
+__pycache__/
+*.pyc
+*.pyo
