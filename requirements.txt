@@ -5,12 +5,14 @@ python-multipart==0.0.20
 pydantic-settings==2.10.1
 
 langgraph==1.1.10
-langchain-core==1.6.1
+langchain-core==1.6.9
 langchain-community==0.4.2
 langchain-openai==1.6.0
 langchain-tavily==0.2.18
 langchain-pinecone==0.2.13
+langchain-huggingface==1.2.3
 langchain-text-splitters==1.1.2
+sentence-transformers==6.1.0
 
 pinecone==7.3.0
 openai==3.3.1
