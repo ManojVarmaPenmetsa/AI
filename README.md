@@ -115,7 +115,7 @@ PINECONE_API_KEY=your_pinecone_api_key
 TAVILY_API_KEY=your_tavily_api_key
 ```
 
-The notebook checks common project and parent-directory locations for `.env`. If a key is not found, it prompts for it without echoing the value. Do not commit `.env` or paste API keys into notebook cells.
+The notebook checks common project and parent-directory locations for `.env` and prompts for any missing key without echoing its value. The application settings in `app/core/config.py` check both the repository-root `.env` and `.conda_env/.env`. Do not commit `.env` or paste API keys into notebook cells.
 
 ## Knowledge-base setup
 
