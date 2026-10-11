@@ -130,6 +130,8 @@ docker run --rm -p 8000:8080 --env-file .conda_env/.env agentic-rag
 
 Alternatively, pass the path to your root `.env` file. Provide the required OpenRouter, Pinecone, and Tavily credentials, and set `ADMIN_API_KEY` to enable uploads. The container listens on port `8080`; the example maps it to `http://127.0.0.1:8000`. Container-local audit records and uploads are not persistent when the container is removed unless you configure Docker volumes.
 
+The Docker build installs CPU-only PyTorch for the local Hugging Face embedding model to avoid CUDA packages. If the platform builder still runs out of memory, increase the build instance memory; the embedding model also uses memory at runtime.
+
 To ask a question from the API:
 
 ```powershell
