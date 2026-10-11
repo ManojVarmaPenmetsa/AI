@@ -4,3 +4,6 @@
 __pycache__/
 *.pyc
 *.pyo
+data/*.db
+uploads/*
+!uploads/.gitkeep

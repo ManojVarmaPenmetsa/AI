@@ -1,17 +1,19 @@
-# Agentic RAG
+# Agentic RAG IT Support Copilot
 
-A Jupyter notebook prototype of an Agentic Retrieval-Augmented Generation (RAG) workflow. It uses LangGraph to decide whether to answer from a vector-store knowledge base, fall back to web search, retry with a rewritten query, or respond directly to a simple message.
+A local web application demonstrating an evidence-aware IT support assistant. The FastAPI backend runs a LangGraph workflow that checks the company knowledge base first, evaluates the retrieved evidence, and uses Tavily web search only when internal evidence is insufficient. A browser UI displays the response, its source citations, and the agent's decision trace.
 
-> **Project scope:** The working Agentic RAG workflow is currently a notebook prototype. The repository also includes an app-oriented directory scaffold, but its FastAPI service, web interface, document-upload flow, and audit database are placeholders—not implemented features.
+The repository also contains [Agentic_RAG.ipynb](./Agentic_RAG.ipynb), the instructor-style notebook demo from which the workflow was developed.
 
-## What it demonstrates
+## Features
 
-- Routes greetings and simple messages separately from knowledge-seeking questions.
-- Loads and chunks source material, embeds it locally, and indexes it in Pinecone.
-- Retrieves relevant chunks and grades whether the private knowledge base is sufficient.
-- Uses Tavily web search when the knowledge-base evidence is weak, then grades the web evidence.
-- Rewrites a weak query and retries, with a retry limit to avoid an unbounded loop.
-- Generates an answer from the selected source and records whether it came from the knowledge base, web search, or direct response.
+- Chat interface with example IT support questions.
+- LangGraph routing for direct messages and IT questions.
+- Pinecone retrieval with local Hugging Face embeddings.
+- Evidence grading, Tavily web fallback, and a bounded query-rewrite retry.
+- Answers with source labels, citations, and a workflow trace.
+- Authenticated PDF, TXT, Markdown, and DOCX ingestion.
+- SQLite audit records for questions, selected source, and workflow trace.
+- Health endpoint and FastAPI interactive API documentation.
 
 ## Workflow
 
@@ -19,76 +21,68 @@ A Jupyter notebook prototype of an Agentic Retrieval-Augmented Generation (RAG) 
 Question
    |
    v
-Route question
-   |-- greeting/simple message ----------> Direct answer
+Route: direct conversation or IT support
+   |-- direct --------------------------> Direct answer
    |
    v
-Retrieve from Pinecone knowledge base
+Retrieve from Pinecone company KB
    |
    v
-Grade knowledge-base evidence
-   |-- good -----------------------------> Answer from knowledge base
+Grade private evidence
+   |-- good ----------------------------> Grounded private-KB answer
    |
    v
-Tavily web search
-   |
-   v
-Grade web evidence
-   |-- good -----------------------------> Answer from web results
+Search Tavily and grade web evidence
+   |-- good ----------------------------> Grounded web answer with citations
    |-- weak --> Rewrite query and retry (bounded)
                     |
                     v
-              Insufficient-evidence response
+             Insufficient-evidence response
 ```
 
 ## Technology
 
 | Component | Technology |
 | --- | --- |
-| Agent workflow | LangGraph |
+| Web application and API | FastAPI, Uvicorn, Jinja2 |
+| User interface | HTML, CSS, JavaScript |
+| Agent orchestration | LangGraph |
 | Chat model | OpenRouter through `ChatOpenAI` |
-| Current model ID | `nvidia/nemotron-3.5-lightning:free` |
-| Embeddings | Hugging Face `sentence-transformers/all-MiniLM-L6-v2` |
-| Vector store | Pinecone |
+| Embeddings | Hugging Face `sentence-transformers/all-MiniLM-L6-v2` (384 dimensions) |
+| Vector database | Pinecone |
 | Web search fallback | Tavily |
-| Implementation | Python notebook |
+| Audit storage | SQLite |
 
-## Repository contents
+Hugging Face embeddings run locally after the model is downloaded; this avoids a paid embedding API. OpenRouter, Tavily, and Pinecone are separate services and may have usage limits or charges depending on your account and plan.
+
+## Project structure
 
 ```text
 .
-├── Agentic_RAG.ipynb
-├── create_project.py
-├── requirements.txt
-├── app/                # Application scaffold; modules are placeholders
-├── data/sample_kb/
-├── static/
-├── templates/
-├── tests/
-├── uploads/
-└── README.md
+├── app/
+│   ├── api/routes.py          # Health, chat, and authenticated ingestion endpoints
+│   ├── core/                  # Settings and logging
+│   ├── rag/                   # LangGraph workflow, state, and Pinecone integration
+│   ├── services/              # Document loading/chunking and SQLite audit
+│   └── main.py                # FastAPI application and UI route
+├── data/
+│   └── sample_kb/             # Sample IT handbook and service-desk runbook
+├── static/                    # Browser CSS and JavaScript
+├── templates/index.html       # Chat and document-ingestion interface
+├── uploads/                   # Local uploaded documents (not committed)
+├── Agentic_RAG.ipynb          # Notebook demonstration
+├── ingest_sample_kb.py        # Index the sample knowledge base
+├── run.py                     # Start the local web application
+└── requirements.txt
 ```
 
-### Create the application scaffold
+## Requirements and setup
 
-Run the scaffold script from the repository root:
+- Python 3.12 recommended.
+- Conda, or another Python environment manager.
+- API keys for OpenRouter and Pinecone; a Tavily key is needed when the graph uses web fallback.
 
-```powershell
-python create_project.py
-```
-
-It creates missing application folders and placeholder files without overwriting existing files. It also creates `.env.example` with the keys used by the notebook; it deliberately does not create `.env`. Copy `.env.example` to `.env` and add your own credentials. The generated application files are starting points and do not yet provide a runnable web app.
-
-## Prerequisites
-
-- Python 3.12 (the notebook has been used with Python 3.12).
-- Conda or another Python environment manager.
-- API keys for OpenRouter, Pinecone, and Tavily.
-- VS Code with the Jupyter extension, or another Jupyter notebook interface.
-
-## Setup
-
-Create and activate an environment, then install the project dependencies:
+From the repository root, create and activate an environment and install dependencies:
 
 ```powershell
 conda create -n agentic-rag python=3.12 -y
@@ -96,62 +90,54 @@ conda activate agentic-rag
 python -m pip install -r requirements.txt
 ```
 
-In VS Code, open `Agentic_RAG.ipynb` and select the `agentic-rag` environment as the notebook kernel. If the environment does not appear as a kernel, install and register `ipykernel`:
-
-```powershell
-python -m pip install ipykernel
-python -m ipykernel install --user --name agentic-rag --display-name "Python (agentic-rag)"
-```
-
-Run the notebook cells from top to bottom. The embedding cell may download the Hugging Face model on its first run.
-
-## Configure API keys
-
-Copy `.env.example` to `.env` in the repository root, then add your keys:
+Configure credentials in a `.env` file at the repository root or in `.conda_env/.env`. The application reads either location. Start from `.env.example` if useful:
 
 ```dotenv
 OPENROUTER_API_KEY=your_openrouter_api_key
 PINECONE_API_KEY=your_pinecone_api_key
 TAVILY_API_KEY=your_tavily_api_key
-ADMIN_API_KEY=use_a_long_random_value_for_document_uploads
+ADMIN_API_KEY=replace_with_a_long_random_secret
 ```
 
-The notebook checks common project and parent-directory locations for `.env` and prompts for any missing key without echoing its value. The application settings in `app/core/config.py` check both the repository-root `.env` and `.conda_env/.env`. Set `ADMIN_API_KEY` to a long, random secret to enable document uploads; uploads are rejected when it is unset. Do not commit `.env` or paste API keys into notebook cells.
+`ADMIN_API_KEY` is required for document uploads through the UI. Keep `.env` private; never commit API keys or upload real company documents to Git.
 
-## Knowledge-base setup
+## Index sample knowledge
 
-The notebook currently loads the LangGraph Agentic RAG documentation page:
+The sample handbook and service-desk runbook are included under `data/sample_kb/`. Index them into Pinecone with:
 
-```text
-https://docs.langchain.com/oss/python/langgraph/agentic-rag
+```powershell
+python ingest_sample_kb.py
 ```
 
-It splits the loaded page into chunks, creates 384-dimensional embeddings, and indexes them in Pinecone. The notebook uses the index `industry-agentic-rag-kb` in the `langgraph-agentic-rag` namespace and creates the index in AWS `us-east-1` if it does not already exist. Pinecone usage may incur charges under your account's plan.
+The configured defaults are Pinecone index `fde-it-support-rag` and namespace `company-it-kb`. Settings may be overridden using environment variables, including `PINECONE_INDEX_NAME`, `PINECONE_NAMESPACE`, `EMBEDDING_MODEL`, `TOP_K`, and `MAX_RETRIES`. The index dimension must match the embedding model; the application reports a mismatch rather than deleting an existing index. The first local embedding run may download the Hugging Face model.
 
-To use other material, update the notebook's source-loading section to load content you are authorized to use. Review data handling and access requirements before sending private or sensitive documents to any external service.
+## Run the application
 
-## Demo queries
+```powershell
+python run.py
+```
 
-The notebook includes examples for:
+Open <http://127.0.0.1:8000>. The API health endpoint is <http://127.0.0.1:8000/api/health>, and interactive API documentation is available at <http://127.0.0.1:8000/docs>.
 
-1. Answering an Agentic RAG question from the knowledge base.
-2. Falling back to Tavily web search when the knowledge base is insufficient.
-3. Answering a greeting directly without retrieval.
-4. Asking about current or external information.
+To ask a question from the API:
 
-The exact route depends on the retrieved evidence and model grading, so a query titled as a knowledge-base demo may still take the web fallback path.
+```powershell
+Invoke-RestMethod -Method Post `
+  -Uri http://127.0.0.1:8000/api/chat `
+  -ContentType "application/json" `
+  -Body '{"question":"How do I connect to the company VPN?"}'
+```
 
-## Notes
+The response includes `answer`, `source_used`, `trace`, `citations`, and `rewritten_query`.
 
-- The graph makes multiple sequential model and service requests; response time depends on OpenRouter model availability, Pinecone, Tavily, network conditions, and whether the web fallback is used.
-- The configured OpenRouter model is a free route and may be rate-limited or time out. A 504 from a provider is a failed request, not a successful answer.
-- The notebook uses a public documentation page as its current example corpus. The phrase “private KB” describes the retrieval path, not the confidentiality of the sample source.
-- The app files created by `create_project.py` are placeholders. Installing dependencies does not make the web app or API functional.
+## Add a company document
 
-## Possible next steps
+Use **Add company document** in the UI, enter the configured admin key, and choose a PDF, TXT, Markdown, or DOCX file. The `/api/ingest` endpoint also accepts the `X-Admin-Key` header. Uploads are written to the local `uploads/` directory and their chunks are added to Pinecone. Upload access is disabled if `ADMIN_API_KEY` is not configured.
 
-- Extract the notebook workflow into reusable Python modules.
-- Add tests for routing, evidence grading, retries, and source tracking.
-- Build a FastAPI service and a user interface around the graph.
-- Add an authenticated document-ingestion workflow and operational logging.
-- Document deployment, monitoring, and data-retention controls before production use.
+## Local data and security
+
+- `data/audit.db` stores chat questions, selected answer source, and workflow traces. Treat it as sensitive local data.
+- Uploaded documents under `uploads/` are local runtime data. Review and remove them according to your organization's retention requirements.
+- Questions and retrieved context may be sent to OpenRouter; fallback searches are sent to Tavily; embeddings are computed locally and vectors are stored in Pinecone. Do not use confidential data unless these services are approved for it.
+- The sample handbook and runbook are demo content, not real company policy. Replace them with documents you are authorized to use.
+- This project is a local demonstration app, not a production deployment. Production use requires additional review of identity/access controls, upload limits and validation, secrets management, logging, privacy, and operational monitoring.
