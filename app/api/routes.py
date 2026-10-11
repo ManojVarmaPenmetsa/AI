@@ -1,4 +1,6 @@
+import secrets
 from pathlib import Path
+
 from fastapi import APIRouter, UploadFile, File, HTTPException, Header
 from pydantic import BaseModel, Field
 from app.core.config import get_settings
@@ -41,7 +43,9 @@ def chat(payload: ChatRequest):
 
 @router.post("/ingest")
 async def ingest(file: UploadFile = File(...), x_admin_key: str = Header(default="")):
-    if x_admin_key != settings.admin_api_key:
+    if not settings.admin_api_key:
+        raise HTTPException(status_code=503, detail="Document upload is not configured")
+    if not secrets.compare_digest(x_admin_key, settings.admin_api_key):
         raise HTTPException(status_code=401, detail="Invalid admin key")
     suffix = Path(file.filename or "").suffix.lower()
     if suffix not in SUPPORTED:

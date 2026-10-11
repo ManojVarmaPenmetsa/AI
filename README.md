@@ -113,9 +113,10 @@ Copy `.env.example` to `.env` in the repository root, then add your keys:
 OPENROUTER_API_KEY=your_openrouter_api_key
 PINECONE_API_KEY=your_pinecone_api_key
 TAVILY_API_KEY=your_tavily_api_key
+ADMIN_API_KEY=use_a_long_random_value_for_document_uploads
 ```
 
-The notebook checks common project and parent-directory locations for `.env` and prompts for any missing key without echoing its value. The application settings in `app/core/config.py` check both the repository-root `.env` and `.conda_env/.env`. Do not commit `.env` or paste API keys into notebook cells.
+The notebook checks common project and parent-directory locations for `.env` and prompts for any missing key without echoing its value. The application settings in `app/core/config.py` check both the repository-root `.env` and `.conda_env/.env`. Set `ADMIN_API_KEY` to a long, random secret to enable document uploads; uploads are rejected when it is unset. Do not commit `.env` or paste API keys into notebook cells.
 
 ## Knowledge-base setup
 

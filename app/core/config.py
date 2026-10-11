@@ -16,6 +16,7 @@ class Settings(BaseSettings):
     openrouter_model: str = "nvidia/nemotron-3.5-lightning:free"
     tavily_api_key: str = ""
     pinecone_api_key: str = ""
+    admin_api_key: str = ""
     pinecone_index_name: str = "fde-it-support-rag"
     pinecone_namespace: str = "company-it-kb"
 
