@@ -16,8 +16,8 @@ class Settings(BaseSettings):
     openrouter_model: str = "nvidia/nemotron-3.5-lightning:free"
     tavily_api_key: str = ""
     pinecone_api_key: str = ""
-    pinecone_index_name: str = "industry-agentic-rag-kb"
-    pinecone_namespace: str = "langgraph-agentic-rag"
+    pinecone_index_name: str = "fde-it-support-rag"
+    pinecone_namespace: str = "company-it-kb"
 
     embedding_model: str = "sentence-transformers/all-MiniLM-L6-v2"
     embedding_dimension: int = 384
@@ -33,6 +33,7 @@ class Settings(BaseSettings):
             str(BASE_DIR / ".conda_env" / ".env"),
             str(BASE_DIR / ".env"),
         ),
+        env_ignore_empty=True,
         extra="ignore",
     )
 
