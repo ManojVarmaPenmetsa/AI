@@ -119,6 +119,17 @@ python run.py
 
 Open <http://127.0.0.1:8000>. The API health endpoint is <http://127.0.0.1:8000/api/health>, and interactive API documentation is available at <http://127.0.0.1:8000/docs>.
 
+## Run with Docker
+
+Build the image from the repository root, where the root-level `Dockerfile` and `.dockerignore` are located:
+
+```powershell
+docker build -t agentic-rag .
+docker run --rm -p 8000:8080 --env-file .conda_env/.env agentic-rag
+```
+
+Alternatively, pass the path to your root `.env` file. Provide the required OpenRouter, Pinecone, and Tavily credentials, and set `ADMIN_API_KEY` to enable uploads. The container listens on port `8080`; the example maps it to `http://127.0.0.1:8000`. Container-local audit records and uploads are not persistent when the container is removed unless you configure Docker volumes.
+
 To ask a question from the API:
 
 ```powershell
