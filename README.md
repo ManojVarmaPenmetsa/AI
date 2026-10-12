@@ -1,8 +1,23 @@
 # Agentic RAG IT Support Copilot
 
-A local web application demonstrating an evidence-aware IT support assistant. The FastAPI backend runs a LangGraph workflow that checks the company knowledge base first, evaluates the retrieved evidence, and uses Tavily web search only when internal evidence is insufficient. A browser UI displays the response, its source citations, and the agent's decision trace.
+An evidence-aware IT support assistant deployed on DigitalOcean. The FastAPI backend runs a LangGraph workflow that checks the company knowledge base first, evaluates the retrieved evidence, and uses Tavily web search only when internal evidence is insufficient. A browser UI displays the response, its source citations, and the agent's decision trace.
+
+This project is designed for a hosted deployment and can also be run locally for development. It is intentionally lightweight, easy to configure, and suitable for experimenting with grounded answers, retrieval quality, and evidence-based fallback behavior.
 
 The repository also contains [Agentic_RAG.ipynb](./Agentic_RAG.ipynb), the instructor-style notebook demo from which the workflow was developed.
+
+## Quick start
+
+The application is deployed on DigitalOcean, but the repository can also be run locally for development and testing.
+
+1. Create and activate a Python environment.
+2. Install dependencies with `python -m pip install -r requirements.txt`.
+3. Copy `.env.example` to `.env` (or use `.conda_env/.env`) and populate the required keys.
+4. Index the sample knowledge base with `python ingest_sample_kb.py`.
+5. Start the app with `python run.py`.
+6. Open `http://127.0.0.1:8080` in the browser for local development.
+
+The app exposes the chat UI, health endpoint, and FastAPI docs at `/docs`.
 
 ## Features
 
@@ -111,13 +126,19 @@ python ingest_sample_kb.py
 
 The configured defaults are Pinecone index `fde-it-support-rag` and namespace `company-it-kb`. Settings may be overridden using environment variables, including `PINECONE_INDEX_NAME`, `PINECONE_NAMESPACE`, `EMBEDDING_MODEL`, `TOP_K`, and `MAX_RETRIES`. The index dimension must match the embedding model; the application reports a mismatch rather than deleting an existing index. The first local embedding run may download the Hugging Face model.
 
-## Run the application
+## Run the application locally
 
 ```powershell
 python run.py
 ```
 
-Open <http://127.0.0.1:8000>. The API health endpoint is <http://127.0.0.1:8000/api/health>, and interactive API documentation is available at <http://127.0.0.1:8000/docs>.
+The app starts on `http://127.0.0.1:8080` because the local runner uses `uvicorn` with port `8080`. The API health endpoint is `http://127.0.0.1:8080/api/health`, and interactive API documentation is available at `http://127.0.0.1:8080/docs`.
+
+If you prefer the more common port 8000, change the port in `run.py` or launch the app directly with `uvicorn app.main:app --host 127.0.0.1 --port 8000 --reload`.
+
+## Deployment
+
+This repository is set up for deployment in a containerized environment and is currently hosted on DigitalOcean. The Dockerfile is configured for a managed web service, with the application listening on `PORT` and binding to `0.0.0.0` inside the container.
 
 ## Run with Docker
 
@@ -125,10 +146,10 @@ Build the image from the repository root, where the root-level `Dockerfile` and 
 
 ```powershell
 docker build -t agentic-rag .
-docker run --rm -p 8000:8080 --env-file .conda_env/.env agentic-rag
+docker run --rm -p 8080:8080 --env-file .conda_env/.env agentic-rag
 ```
 
-Alternatively, pass the path to your root `.env` file. Provide the required OpenRouter, Pinecone, and Tavily credentials, and set `ADMIN_API_KEY` to enable uploads. The container listens on port `8080`; the example maps it to `http://127.0.0.1:8000`. Container-local audit records and uploads are not persistent when the container is removed unless you configure Docker volumes.
+Alternatively, pass the path to your root `.env` file. Provide the required OpenRouter, Pinecone, and Tavily credentials, and set `ADMIN_API_KEY` to enable uploads. The container listens on port `8080` and is exposed locally at `http://127.0.0.1:8080`. Container-local audit records and uploads are not persistent when the container is removed unless you configure Docker volumes.
 
 The Docker build installs CPU-only PyTorch for the local Hugging Face embedding model to avoid CUDA packages. If the platform builder still runs out of memory, increase the build instance memory; the embedding model also uses memory at runtime.
 
@@ -136,7 +157,7 @@ To ask a question from the API:
 
 ```powershell
 Invoke-RestMethod -Method Post `
-  -Uri http://127.0.0.1:8000/api/chat `
+  -Uri http://127.0.0.1:8080/api/chat `
   -ContentType "application/json" `
   -Body '{"question":"How do I connect to the company VPN?"}'
 ```
@@ -147,10 +168,10 @@ The response includes `answer`, `source_used`, `trace`, `citations`, and `rewrit
 
 Use **Add company document** in the UI, enter the configured admin key, and choose a PDF, TXT, Markdown, or DOCX file. The `/api/ingest` endpoint also accepts the `X-Admin-Key` header. Uploads are written to the local `uploads/` directory and their chunks are added to Pinecone. Upload access is disabled if `ADMIN_API_KEY` is not configured.
 
-## Local data and security
+## Hosted data and security
 
-- `data/audit.db` stores chat questions, selected answer source, and workflow traces. Treat it as sensitive local data.
-- Uploaded documents under `uploads/` are local runtime data. Review and remove them according to your organization's retention requirements.
+- `data/audit.db` stores chat questions, selected answer source, and workflow traces. Treat it as sensitive runtime data whether the app is running locally or in the cloud.
+- Uploaded documents under `uploads/` are runtime data. Review and remove them according to your organization's retention requirements.
 - Questions and retrieved context may be sent to OpenRouter; fallback searches are sent to Tavily; embeddings are computed locally and vectors are stored in Pinecone. Do not use confidential data unless these services are approved for it.
 - The sample handbook and runbook are demo content, not real company policy. Replace them with documents you are authorized to use.
-- This project is a local demonstration app, not a production deployment. Production use requires additional review of identity/access controls, upload limits and validation, secrets management, logging, privacy, and operational monitoring.
+- This project is suitable for a managed deployment such as DigitalOcean, but it still requires review of identity/access controls, upload limits and validation, secrets management, logging, privacy, and operational monitoring before production use at scale.
