@@ -26,6 +26,7 @@ class Settings(BaseSettings):
     max_retries: int = 1
 
     audit_db_path: str = str(BASE_DIR / "data" / "audit.db")
+    conversation_db_path: str = str(BASE_DIR / "data" / "conversations.db")
     upload_dir: str = str(BASE_DIR / "uploads")
     sample_kb_dir: str = str(BASE_DIR / "data" / "sample_kb")
 

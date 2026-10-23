@@ -1,26 +1,54 @@
-from pathlib import Path
+from contextlib import asynccontextmanager
+from threading import RLock
+
 from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
+
 from app.api.routes import router
-from app.core.config import get_settings, BASE_DIR
+from app.core.config import BASE_DIR, get_settings
 from app.core.logging import configure_logging
 from app.services.audit import init_db
+from app.rag.workflow import build_graph
+from app.services.conversations import open_conversation_store
+from langgraph.checkpoint.sqlite import SqliteSaver
+from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
 
 
-configure_logging()
-settings = get_settings()
-init_db()
+def create_app() -> FastAPI:
+    configure_logging()
+    settings = get_settings()
+    @asynccontextmanager
+    async def lifespan(app: FastAPI):
+        init_db()
+        connection = open_conversation_store(settings.conversation_db_path)
+        try:
+            checkpointer = SqliteSaver(
+                connection,
+                serde=JsonPlusSerializer(allowed_msgpack_modules=None),
+            )
+            checkpointer.setup()
+            app.state.conversation_store = connection
+            app.state.conversation_lock = RLock()
+            app.state.agent_graph = build_graph(checkpointer=checkpointer)
+            yield
+        finally:
+            connection.close()
+
+    app = FastAPI(title=settings.app_name, version="1.0.0", lifespan=lifespan)
+    app.include_router(router)
+    app.mount("/static", StaticFiles(directory=str(BASE_DIR / "static")), name="static")
+    templates = Jinja2Templates(directory=str(BASE_DIR / "templates"))
+
+    @app.get("/", response_class=HTMLResponse)
+    def home(request: Request):
+        return templates.TemplateResponse(
+            "index.html",
+            {"request": request, "app_name": settings.app_name},
+        )
+
+    return app
 
 
-app = FastAPI(title=settings.app_name, version="1.0.0")
-
-app.include_router(router)
-app.mount("/static", StaticFiles(directory=str(BASE_DIR / "static")), name="static")
-templates = Jinja2Templates(directory=str(BASE_DIR / "templates"))
-
-
-@app.get("/", response_class=HTMLResponse)
-def home(request: Request):
-    return templates.TemplateResponse("index.html", {"request": request, "app_name": settings.app_name})
+app = create_app()

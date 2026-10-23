@@ -2,6 +2,7 @@ from typing import List, Literal
 from typing_extensions import TypedDict
 from pydantic import BaseModel, Field
 from langchain_core.documents import Document
+from langgraph.graph import MessagesState
 
 class RouteDecision(BaseModel):
     route: Literal["kb", "direct"] = Field(description="kb for IT/support questions; direct for greetings/simple chat")
@@ -9,7 +10,7 @@ class RouteDecision(BaseModel):
 class EvidenceGrade(BaseModel):
     grade: Literal["good", "weak"] = Field(description="Whether evidence is sufficient to answer")
 
-class AgentState(TypedDict):
+class AgentState(MessagesState, total=False):
     question: str
     current_query: str
     kb_docs: List[Document]

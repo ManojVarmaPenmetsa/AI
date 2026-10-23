@@ -2,6 +2,7 @@ import logging
 from typing import Literal
 
 from langchain_openai import ChatOpenAI
+from langchain_core.messages import AIMessage, HumanMessage
 from langchain_tavily import TavilySearch
 from langgraph.graph import END, START, StateGraph
 
@@ -50,6 +51,44 @@ def add_trace(state: AgentState, message: str) -> list[str]:
     return [*state.get("trace", []), message]
 
 
+def conversation_history(state: AgentState) -> str:
+    """Format prior turns separately from retrieved knowledge documents."""
+    messages = state.get("messages", [])
+    prior = messages[:-1] if messages and isinstance(messages[-1], HumanMessage) else messages
+    prior = prior[-12:]
+    return "\n".join(
+        f"{('User' if isinstance(message, HumanMessage) else 'Assistant')}: {message.content}"
+        for message in prior
+        if isinstance(message.content, str) and message.content.strip()
+    )
+
+
+def resolve_query(state: AgentState) -> dict[str, object]:
+    history = conversation_history(state)
+    if not history:
+        return {"current_query": state["question"]}
+    standalone = llm().invoke(
+        f"""
+Rewrite the latest user message as a standalone search query for an IT support assistant.
+Use the conversation only to resolve references, pronouns, omitted subjects, and clarifications.
+If the latest message is already standalone or is casual chat, return it unchanged.
+Do not answer. Return only the rewritten query.
+
+Conversation history:
+{history}
+Latest user message (preserve it as the user's original question):
+{state['question']}
+"""
+    ).content
+    query = standalone.strip() if isinstance(standalone, str) else ""
+    if not query:
+        query = state["question"]
+    return {
+        "current_query": query,
+        "trace": add_trace(state, "Follow-up context resolved"),
+    }
+
+
 def route_question(state: AgentState) -> dict[str, object]:
     router = llm().with_structured_output(RouteDecision, method="json_mode")
     decision = router.invoke(
@@ -58,7 +97,7 @@ You route messages for an enterprise IT support assistant.
 Use kb for questions about company IT policies, VPN, password reset, MFA, laptop setup,
 software access, security, email, devices, troubleshooting, or technology support.
 Use direct only for greetings, thanks, or casual chat that needs no company knowledge.
-Question: {state["question"]}
+Question: {state["current_query"]}
 Return valid JSON like {{"route":"kb"}}.
 """
     )
@@ -91,7 +130,7 @@ def grade_kb(state: AgentState) -> dict[str, object]:
     grade = grader.invoke(
         f"""
 You grade evidence for an enterprise IT support assistant.
-Question: {state["question"]}
+Question: {state["current_query"]}
 Private company KB evidence:
 {context}
 Return good only if the evidence is sufficient to answer confidently and specifically.
@@ -146,7 +185,7 @@ def grade_web(state: AgentState) -> dict[str, object]:
     grader = llm().with_structured_output(EvidenceGrade, method="json_mode")
     grade = grader.invoke(
         f"""
-Question: {state["question"]}
+Question: {state["current_query"]}
 Web evidence:
 {state["web_results"]}
 Return good if the evidence is sufficient and directly relevant; otherwise weak.
@@ -175,7 +214,7 @@ def rewrite_query(state: AgentState) -> dict[str, object]:
         f"""
 Rewrite this IT support question for better private knowledge retrieval and vendor web search.
 Preserve intent, add useful technical keywords, do not answer, return only the query.
-Question: {state["question"]}
+Question: {state["current_query"]}
 """
     ).content
     if not isinstance(rewritten, str) or not rewritten.strip():
@@ -194,12 +233,17 @@ def generate_from_kb(state: AgentState) -> dict[str, object]:
         f"[Source: {doc.metadata.get('source', 'unknown')}]\n{doc.page_content}"
         for doc in state["kb_docs"]
     )
+    history = conversation_history(state) or "No prior conversation."
     answer = llm().invoke(
         f"""
 You are an enterprise IT support copilot. Answer ONLY from the private company KB below.
 Be concise, actionable, and safe. If steps are present, present them clearly.
 Do not invent policy details. Mention that the answer is based on the company's private knowledge base.
-Question: {state["question"]}
+Conversation history (for continuity; not evidence):
+{history}
+
+Current user question:
+{state["question"]}
 
 Private KB:
 {context}
@@ -222,6 +266,7 @@ Private KB:
 
     return {
         "answer": answer,
+        "messages": [AIMessage(content=answer)],
         "source_used": "private_kb",
         "citations": citations,
         "trace": add_trace(state, "Answer generation → PRIVATE KB"),
@@ -229,12 +274,17 @@ Private KB:
 
 
 def generate_from_web(state: AgentState) -> dict[str, object]:
+    history = conversation_history(state) or "No prior conversation."
     answer = llm().invoke(
         f"""
 You are an enterprise IT support copilot. The private company KB was insufficient.
 Answer ONLY from the web evidence below. Clearly say this is external web information
 and may need IT validation before changing company-managed systems.
-Question: {state["question"]}
+Conversation history (for continuity; not evidence):
+{history}
+
+Current user question:
+{state["question"]}
 
 Web evidence:
 {state["web_results"]}
@@ -242,6 +292,7 @@ Web evidence:
     ).content
     return {
         "answer": answer,
+        "messages": [AIMessage(content=answer)],
         "source_used": "web_search",
         "trace": add_trace(state, "Answer generation → WEB SEARCH"),
     }
@@ -249,10 +300,14 @@ Web evidence:
 
 def direct_answer(state: AgentState) -> dict[str, object]:
     answer = llm().invoke(
-        f"Respond briefly and naturally to: {state['question']}"
+        f"""Respond briefly and naturally, maintaining continuity with the conversation.
+Conversation history:
+{conversation_history(state) or 'No prior conversation.'}
+Current user message: {state['question']}"""
     ).content
     return {
         "answer": answer,
+        "messages": [AIMessage(content=answer)],
         "source_used": "direct",
         "trace": add_trace(state, "Direct response → no retrieval"),
     }
@@ -265,14 +320,20 @@ def insufficient(state: AgentState) -> dict[str, object]:
             "or external search to answer confidently. Please contact the IT help "
             "desk or provide more details."
         ),
+        "messages": [AIMessage(content=(
+            "I couldn't find enough reliable evidence in the company knowledge base "
+            "or external search to answer confidently. Please contact the IT help "
+            "desk or provide more details."
+        ))],
         "source_used": "insufficient_evidence",
         "trace": add_trace(state, "Stopped → insufficient reliable evidence"),
     }
 
 
-def build_graph():
+def build_graph(checkpointer=None):
     graph = StateGraph(AgentState)
     for name, node in {
+        "resolve_query": resolve_query,
         "route_question": route_question,
         "retrieve_kb": retrieve_kb,
         "grade_kb": grade_kb,
@@ -286,7 +347,8 @@ def build_graph():
     }.items():
         graph.add_node(name, node)
 
-    graph.add_edge(START, "route_question")
+    graph.add_edge(START, "resolve_query")
+    graph.add_edge("resolve_query", "route_question")
     graph.add_conditional_edges(
         "route_question",
         route_after_router,
@@ -320,18 +382,19 @@ def build_graph():
     ):
         graph.add_edge(terminal_node, END)
 
-    return graph.compile()
+    return graph.compile(checkpointer=checkpointer)
 
 
 agent_graph = build_graph()
 
 
-def ask(question: str) -> AgentState:
+def ask(question: str, thread_id: str | None = None, graph=None) -> AgentState:
     if not question.strip():
         raise ValueError("Question must not be empty")
 
     initial: AgentState = {
         "question": question,
+        "messages": [HumanMessage(content=question)],
         "current_query": question,
         "kb_docs": [],
         "web_results": "",
@@ -343,4 +406,6 @@ def ask(question: str) -> AgentState:
         "trace": [],
         "citations": [],
     }
-    return agent_graph.invoke(initial)
+    active_graph = graph or agent_graph
+    config = {"configurable": {"thread_id": thread_id}} if thread_id else None
+    return active_graph.invoke(initial, config=config)

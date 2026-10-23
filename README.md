@@ -26,6 +26,7 @@ The app exposes the chat UI, health endpoint, and FastAPI docs at `/docs`.
 - Pinecone retrieval with local Hugging Face embeddings.
 - Evidence grading, Tavily web fallback, and a bounded query-rewrite retry.
 - Answers with source labels, citations, and a workflow trace.
+- Persistent conversations with browser refresh and backend restart recovery.
 - Authenticated PDF, TXT, Markdown, and DOCX ingestion.
 - SQLite audit records for questions, selected source, and workflow trace.
 - Health endpoint and FastAPI interactive API documentation.
@@ -66,7 +67,8 @@ Search Tavily and grade web evidence
 | Embeddings | Hugging Face `sentence-transformers/all-MiniLM-L6-v2` (384 dimensions) |
 | Vector database | Pinecone |
 | Web search fallback | Tavily |
-| Audit storage | SQLite |
+| Conversation ownership and LangGraph checkpoints | SQLite |
+| Audit storage | Separate SQLite database |
 
 Hugging Face embeddings run locally after the model is downloaded; this avoids a paid embedding API. OpenRouter, Tavily, and Pinecone are separate services and may have usage limits or charges depending on your account and plan.
 
@@ -134,6 +136,8 @@ python run.py
 
 The app starts on `http://127.0.0.1:8080` because the local runner uses `uvicorn` with port `8080`. The API health endpoint is `http://127.0.0.1:8080/api/health`, and interactive API documentation is available at `http://127.0.0.1:8080/docs`.
 
+Conversations are stored in `CONVERSATION_DB_PATH` (default `data/conversations.db`). The LangGraph checkpointer and the conversation ownership registry share this database connection, while audit records remain in `AUDIT_DB_PATH`. For a hosted single-instance deployment, point this setting at a persistent mounted disk so data survives replacement of the application container. SQLite is suitable for local development and a single app instance; deployments with multiple app replicas or a shared network filesystem should move the checkpointer and ownership registry to a managed PostgreSQL backend before scaling. This app currently configures the SQLite saver.
+
 If you prefer the more common port 8000, change the port in `run.py` or launch the app directly with `uvicorn app.main:app --host 127.0.0.1 --port 8000 --reload`.
 
 ## Deployment
@@ -162,7 +166,7 @@ Invoke-RestMethod -Method Post `
   -Body '{"question":"How do I connect to the company VPN?"}'
 ```
 
-The response includes `answer`, `source_used`, `trace`, `citations`, and `rewritten_query`.
+The response includes `answer`, `source_used`, `trace`, `citations`, `rewritten_query`, and `conversation_id`. Pass that ID in subsequent `/api/chat` requests to continue the thread. `POST /api/conversations` starts a new thread; `GET /api/conversations/{conversation_id}` resumes its visible message history. The API sets an opaque HttpOnly browser cookie and binds each ID to that owner token. This is browser-level isolation; deployments that need account-level identity should connect it to the application's authentication system.
 
 ## Add a company document
 
@@ -171,6 +175,7 @@ Use **Add company document** in the UI, enter the configured admin key, and choo
 ## Hosted data and security
 
 - `data/audit.db` stores chat questions, selected answer source, and workflow traces. Treat it as sensitive runtime data whether the app is running locally or in the cloud.
+- `data/conversations.db` stores LangGraph execution checkpoints and a separate conversation ownership table. The graph uses LangGraph's message state for turns and restricts checkpoint deserialization to its safe built-in type allowlist. Do not put credentials or unnecessary sensitive data in chat messages.
 - Uploaded documents under `uploads/` are runtime data. Review and remove them according to your organization's retention requirements.
 - Questions and retrieved context may be sent to OpenRouter; fallback searches are sent to Tavily; embeddings are computed locally and vectors are stored in Pinecone. Do not use confidential data unless these services are approved for it.
 - The sample handbook and runbook are demo content, not real company policy. Replace them with documents you are authorized to use.
