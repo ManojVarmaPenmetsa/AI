@@ -38,6 +38,7 @@ class Settings(BaseSettings):
     embedding_model: str = "sentence-transformers/all-MiniLM-L6-v2"
     embedding_dimension: int = 384
     top_k: int = 4
+    retrieval_candidate_k: int = 12
     max_retries: int = 1
 
     audit_db_path: str = str(BASE_DIR / "data" / "audit.db")

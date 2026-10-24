@@ -1,3 +1,4 @@
+import hashlib
 import logging
 from typing import Literal
 
@@ -121,11 +122,38 @@ def retrieve_kb(state: AgentState) -> dict[str, object]:
     }
 
 
+def _evidence_chunk_id(doc) -> str:
+    chunk_id = doc.metadata.get("chunk_id")
+    if chunk_id:
+        return str(chunk_id)
+    identity = "|".join(
+        str(value or "")
+        for value in (
+            doc.metadata.get("document_id"),
+            doc.metadata.get("source_filename", doc.metadata.get("source")),
+            doc.metadata.get("page"),
+            doc.metadata.get("content_type"),
+            doc.page_content,
+        )
+    )
+    return hashlib.sha256(identity.encode("utf-8")).hexdigest()
+
+
 def grade_kb(state: AgentState) -> dict[str, object]:
     grader = llm().with_structured_output(EvidenceGrade, method="json_mode")
+    docs = state.get("kb_docs", [])
+    documents_by_id = {_evidence_chunk_id(doc): doc for doc in docs}
     context = "\n\n".join(
-        f"Source: {doc.metadata.get('source', 'unknown')}\n{doc.page_content}"
-        for doc in state["kb_docs"]
+        "\n".join(
+            (
+                f"Chunk ID: {chunk_id}",
+                f"Source: {doc.metadata.get('source_filename', doc.metadata.get('source', 'unknown'))}",
+                f"Page: {doc.metadata.get('page', 'unknown')}",
+                f"Content type: {doc.metadata.get('content_type', 'unknown')}",
+                f"Evidence: {doc.page_content}",
+            )
+        )
+        for chunk_id, doc in documents_by_id.items()
     )
     grade = grader.invoke(
         f"""
@@ -133,14 +161,35 @@ You grade evidence for an enterprise IT support assistant.
 Question: {state["current_query"]}
 Private company KB evidence:
 {context}
-Return good only if the evidence is sufficient to answer confidently and specifically.
-Otherwise return weak. JSON: {{"grade":"good"}} or {{"grade":"weak"}}.
+Select only chunks that directly support a factual answer to the question.
+Question-only test prompts, suggested questions, generic background, and unrelated
+chunks do not support an answer, even if they repeat the question's wording.
+Return good only if the selected evidence is sufficient to answer confidently and
+specifically. Return the exact supporting chunk IDs from the supplied evidence.
+If evidence is insufficient, return weak and an empty supporting_chunk_ids list.
+JSON: {{"grade":"good","supporting_chunk_ids":["..."]}} or
+{{"grade":"weak","supporting_chunk_ids":[]}}.
 """
     )
-    logger.info("Private KB evidence graded %s", grade.grade)
+    valid_supporting_ids = list(dict.fromkeys(
+        chunk_id
+        for chunk_id in grade.supporting_chunk_ids
+        if chunk_id in documents_by_id
+    ))
+    final_grade = "good" if grade.grade == "good" and valid_supporting_ids else "weak"
+    supporting_ids = valid_supporting_ids if final_grade == "good" else []
+    supporting_docs = [documents_by_id[chunk_id] for chunk_id in supporting_ids]
+    logger.info(
+        "Private KB evidence graded %s using %d of %d retrieved chunks",
+        final_grade,
+        len(supporting_docs),
+        len(docs),
+    )
     return {
-        "kb_grade": grade.grade,
-        "trace": add_trace(state, f"KB evidence grade → {grade.grade.upper()}"),
+        "kb_grade": final_grade,
+        "kb_docs": supporting_docs,
+        "kb_supporting_chunk_ids": supporting_ids,
+        "trace": add_trace(state, f"KB evidence grade → {final_grade.upper()}"),
     }
 
 
@@ -251,12 +300,17 @@ Private KB:
     ).content
 
     citations: list[dict[str, str]] = []
-    seen: set[tuple[str, str, str]] = set()
+    seen: set[tuple[str, str]] = set()
     for doc in state["kb_docs"]:
-        source = str(doc.metadata.get("source") or "Private KB")
+        source = str(
+            doc.metadata.get("source_filename")
+            or doc.metadata.get("source")
+            or "Private KB"
+        )
         page = doc.metadata.get("page")
         content_type = str(doc.metadata.get("content_type") or "")
-        citation_key = (source, str(page or ""), content_type)
+        citation_source_id = str(doc.metadata.get("document_id") or source)
+        citation_key = (citation_source_id, str(page or ""))
         if citation_key not in seen:
             seen.add(citation_key)
             title = source.replace("\\", "/").rsplit("/", 1)[-1]

@@ -111,7 +111,10 @@ def get_vectorstore():
 def get_retriever():
     registry = DocumentRegistry(settings.document_registry_db_path)
     return get_vectorstore().as_retriever(
-        search_kwargs={"k": settings.top_k, "filter": registry.active_generation_filter()}
+        search_kwargs={
+            "k": max(settings.top_k, settings.retrieval_candidate_k),
+            "filter": registry.active_generation_filter(),
+        }
     )
 
 

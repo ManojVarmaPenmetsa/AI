@@ -9,11 +9,16 @@ class RouteDecision(BaseModel):
 
 class EvidenceGrade(BaseModel):
     grade: Literal["good", "weak"] = Field(description="Whether evidence is sufficient to answer")
+    supporting_chunk_ids: List[str] = Field(
+        default_factory=list,
+        description="Exact chunk IDs that directly support the answer",
+    )
 
 class AgentState(MessagesState, total=False):
     question: str
     current_query: str
     kb_docs: List[Document]
+    kb_supporting_chunk_ids: List[str]
     web_results: str
     kb_grade: str
     web_grade: str
