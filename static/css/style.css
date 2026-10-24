@@ -397,6 +397,7 @@ body {
     font-size: 13px;
     margin-top: 10px;
     color: #9AA8C0;
+    white-space: pre-wrap;
 }
 
 button:focus-visible,

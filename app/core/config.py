@@ -14,6 +14,21 @@ class Settings(BaseSettings):
     openrouter_api_key: str = ""
     openrouter_base_url: str = "https://openrouter.ai/api/v1"
     openrouter_model: str = "nvidia/nemotron-3.5-lightning:free"
+    vision_provider: str = "openai_compatible"
+    vision_model: str = ""
+    vision_api_key: str = ""
+    vision_base_url: str = ""
+    vision_timeout_seconds: int = 30
+    pdf_vision_max_pages: int = 8
+    pdf_vision_min_image_area_ratio: float = 0.05
+    pdf_vision_min_drawings: int = 80
+    pdf_render_dpi: int = 150
+    pdf_vision_max_pixels: int = 20_000_000
+    pdf_vision_max_image_bytes: int = 12_582_912
+    pdf_min_text_words: int = 25
+    ocr_provider: str = "tesseract"
+    tesseract_cmd: str = ""
+    ocr_timeout_seconds: int = 20
     tavily_api_key: str = ""
     pinecone_api_key: str = ""
     admin_api_key: str = ""
@@ -27,6 +42,7 @@ class Settings(BaseSettings):
 
     audit_db_path: str = str(BASE_DIR / "data" / "audit.db")
     conversation_db_path: str = str(BASE_DIR / "data" / "conversations.db")
+    document_registry_db_path: str = str(BASE_DIR / "data" / "document_registry.db")
     upload_dir: str = str(BASE_DIR / "uploads")
     sample_kb_dir: str = str(BASE_DIR / "data" / "sample_kb")
 

@@ -1,4 +1,5 @@
 import time
+from app.services.document_registry import DocumentRegistry
 from pinecone import Pinecone, ServerlessSpec
 from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_pinecone import PineconeVectorStore
@@ -108,10 +109,89 @@ def get_vectorstore():
 
 
 def get_retriever():
-    return get_vectorstore().as_retriever(search_kwargs={"k": settings.top_k})
+    registry = DocumentRegistry(settings.document_registry_db_path)
+    return get_vectorstore().as_retriever(
+        search_kwargs={"k": settings.top_k, "filter": registry.active_generation_filter()}
+    )
 
 
 
 def add_documents(chunks):
     store = get_vectorstore()
-    return store.add_documents(chunks)
+    ids = [
+        str(doc.metadata.get("chunk_id") or _fallback_chunk_id(doc))
+        for doc in chunks
+    ]
+    return store.add_documents(chunks, ids=ids)
+
+
+def upsert_generation_documents(chunks) -> list[str]:
+    """Upsert and fetch-verify every expected ID before a generation can activate."""
+    expected = [str(doc.metadata["chunk_id"]) for doc in chunks]
+    if not expected or len(expected) != len(set(expected)):
+        raise ValueError("Generation has no chunks or contains duplicate chunk IDs")
+    returned = add_documents(chunks)
+    if returned is None or set(map(str, returned)) != set(expected) or len(returned) != len(expected):
+        raise RuntimeError("Pinecone did not confirm every expected chunk ID")
+
+    index = get_vectorstore().index
+    for offset in range(0, len(expected), 100):
+        batch = expected[offset:offset + 100]
+        fetched = index.fetch(ids=batch, namespace=settings.pinecone_namespace)
+        vectors = fetched.get("vectors", {}) if isinstance(fetched, dict) else getattr(fetched, "vectors", {})
+        missing = set(batch) - set(vectors or {})
+        if missing:
+            raise RuntimeError(f"Pinecone fetch verification missed {len(missing)} chunk IDs")
+    return expected
+
+
+def delete_inactive_document_generations(document_id: str, active_generation_id: str) -> None:
+    """Delete only inactive/legacy vectors belonging to this registered document."""
+    index = get_vectorstore().index
+    index.delete(
+        namespace=settings.pinecone_namespace,
+        filter={"document_id": document_id, "generation_id": {"$ne": active_generation_id}},
+    )
+
+
+def delete_vector_ids(ids: list[str]) -> None:
+    if not ids:
+        return
+    get_vectorstore().index.delete(ids=ids, namespace=settings.pinecone_namespace)
+
+
+def _fallback_chunk_id(document):
+    import hashlib
+
+    source = str(document.metadata.get("source") or "")
+    page = str(document.metadata.get("page") or "")
+    content = document.page_content
+    return hashlib.sha256(f"{source}|{page}|{content}".encode("utf-8")).hexdigest()
+
+
+def delete_document_vectors(document_id: str) -> None:
+    store = get_vectorstore()
+    store.index.delete(
+        namespace=settings.pinecone_namespace,
+        filter={"document_id": document_id},
+    )
+
+
+def delete_legacy_source_vectors(source: str) -> None:
+    """Clean up vectors created before document IDs and versions were added."""
+    store = get_vectorstore()
+    store.index.delete(
+        namespace=settings.pinecone_namespace,
+        filter={"source": {"$eq": source}},
+    )
+
+
+def delete_obsolete_document_versions(document_id: str, current_version: str) -> None:
+    store = get_vectorstore()
+    store.index.delete(
+        namespace=settings.pinecone_namespace,
+        filter={
+            "document_id": document_id,
+            "document_version": {"$ne": current_version},
+        },
+    )

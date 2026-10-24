@@ -251,14 +251,24 @@ Private KB:
     ).content
 
     citations: list[dict[str, str]] = []
-    seen: set[str] = set()
+    seen: set[tuple[str, str, str]] = set()
     for doc in state["kb_docs"]:
         source = str(doc.metadata.get("source") or "Private KB")
-        if source not in seen:
-            seen.add(source)
+        page = doc.metadata.get("page")
+        content_type = str(doc.metadata.get("content_type") or "")
+        citation_key = (source, str(page or ""), content_type)
+        if citation_key not in seen:
+            seen.add(citation_key)
+            title = source.replace("\\", "/").rsplit("/", 1)[-1]
+            if page:
+                title += f" — page {page}"
+            if content_type in {"diagram_description", "screenshot_description"}:
+                title += " (visual description)"
+            elif content_type in {"ocr", "screenshot_ocr"}:
+                title += " (OCR)"
             citations.append(
                 {
-                    "title": source.replace("\\", "/").rsplit("/", 1)[-1],
+                    "title": title,
                     "url": "",
                     "type": "private_kb",
                 }

@@ -12,6 +12,7 @@ from app.core.logging import configure_logging
 from app.services.audit import init_db
 from app.rag.workflow import build_graph
 from app.services.conversations import open_conversation_store
+from app.services.document_registry import DocumentRegistry
 from langgraph.checkpoint.sqlite import SqliteSaver
 from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
 
@@ -31,6 +32,7 @@ def create_app() -> FastAPI:
             checkpointer.setup()
             app.state.conversation_store = connection
             app.state.conversation_lock = RLock()
+            app.state.document_registry = DocumentRegistry(settings.document_registry_db_path)
             app.state.agent_graph = build_graph(checkpointer=checkpointer)
             yield
         finally:
