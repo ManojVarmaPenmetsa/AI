@@ -182,6 +182,55 @@ class MultimodalIngestionTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "malformed"):
                 provider(b"image", 1, "doc.pdf")
 
+    def test_empty_vision_response_reports_parse_stage_and_retains_ocr(self):
+        class EmptyResponseModel:
+            def __init__(self, **_kwargs):
+                pass
+
+            def invoke(self, _messages):
+                return SimpleNamespace(content="")
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "empty-vision-response.pdf"
+            pdf = fitz.open()
+            page = pdf.new_page(width=300, height=180)
+            pixmap = fitz.Pixmap(fitz.csRGB, fitz.IRect(0, 0, 300, 180), 0)
+            pixmap.clear_with(245)
+            page.insert_image(page.rect, stream=pixmap.tobytes("png"))
+            pdf.save(path)
+            pdf.close()
+
+            settings = test_settings(
+                vision_model="test/vision-model",
+                vision_api_key="secret-key",
+            )
+            with (
+                patch("app.services.ingestion.get_settings", return_value=settings),
+                patch("app.services.ingestion.ChatOpenAI", EmptyResponseModel),
+                self.assertLogs("app.services.ingestion", level="WARNING") as captured,
+            ):
+                result = ingest_file(
+                    path,
+                    source_filename="handbook.pdf",
+                    ocr_provider=lambda _image: "OCR retained the visible troubleshooting text.",
+                )
+
+        self.assertEqual(result.vision_status, "failed")
+        self.assertEqual(result.vision_failed_pages, [1])
+        self.assertTrue(any("OCR retained" in doc.page_content for doc in result.documents))
+        self.assertTrue(
+            any("vision response parsing failed" in warning for warning in result.warnings)
+        )
+        record = captured.records[0]
+        self.assertEqual(record.failed_stage, "response_parsing")
+        self.assertEqual(record.exception_type, "ValueError")
+        self.assertEqual(
+            record.exception_message,
+            "Vision provider returned an empty or malformed response",
+        )
+        self.assertEqual(record.provider_response["content_kind"], "text")
+        self.assertNotIn("secret-key", repr(record.__dict__))
+
     def test_vision_description_is_chunked_indexed_and_retrievable(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             path = Path(temp_dir) / "diagram.pdf"
@@ -219,7 +268,7 @@ class MultimodalIngestionTests(unittest.TestCase):
             self.assertEqual(retrieved[0].metadata["page"], 1)
             self.assertTrue(retrieved[0].metadata["chunk_id"])
 
-    def test_vision_failures_mark_ingestion_partial_without_exposing_exception_text(self):
+    def test_vision_provider_failures_are_reported_without_exception_text(self):
         class ProviderError(Exception):
             status_code = 429
 
@@ -233,19 +282,25 @@ class MultimodalIngestionTests(unittest.TestCase):
             pdf.close()
 
             def fail_vision(*_args):
-                raise ProviderError("secret-key and sensitive page contents")
+                raise ProviderError("secret-key must not escape")
 
-            with patch(
-                "app.services.ingestion.get_settings",
-                return_value=test_settings(pdf_vision_min_drawings=1),
+            with (
+                patch(
+                    "app.services.ingestion.get_settings",
+                    return_value=test_settings(pdf_vision_min_drawings=1),
+                ),
+                self.assertLogs("app.services.ingestion", level="WARNING") as captured,
             ):
                 result = ingest_file(path, vision_provider=fail_vision)
 
-            self.assertEqual(result.vision_status, "partial")
+            self.assertEqual(result.vision_status, "failed")
             self.assertEqual(result.visual_pages_detected, [1])
             self.assertEqual(result.vision_pages, [])
             self.assertTrue(any("HTTP 429" in warning for warning in result.warnings))
             self.assertFalse(any("secret-key" in warning for warning in result.warnings))
+            self.assertEqual(captured.records[0].failed_stage, "provider_request")
+            self.assertEqual(captured.records[0].provider_status, 429)
+            self.assertNotIn("secret-key", repr(captured.records[0].__dict__))
 
     def test_selectable_pdf_text_has_stable_provenance_and_chunk_ids(self):
         with tempfile.TemporaryDirectory() as temp_dir:

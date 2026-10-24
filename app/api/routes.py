@@ -220,6 +220,10 @@ async def ingest(
             },
         ) from exc
     warnings = replacement["warnings"]
+    text_ocr_types = {"text", "table", "ocr", "screenshot_ocr"}
+    text_ocr_chunk_count = sum(
+        1 for chunk in chunks if chunk.metadata.get("content_type") in text_ocr_types
+    )
     await _audit_ingestion_safely(
         document_id,
         original_filename,
@@ -239,6 +243,11 @@ async def ingest(
         "vision_pages": result.vision_pages,
         "visual_pages_detected": result.visual_pages_detected,
         "vision_status": result.vision_status,
+        "vision_analysis_status": result.vision_status,
+        "vision_failed_pages": result.vision_failed_pages,
+        "document_index_status": "completed",
+        "text_ocr_index_status": "completed" if text_ocr_chunk_count else "no_content",
+        "text_ocr_chunks": text_ocr_chunk_count,
         "chunks": len(chunks),
         "ids_created": len(ids or []),
         "cleanup_pending": replacement["cleanup_pending"],

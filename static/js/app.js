@@ -64,6 +64,9 @@ document.getElementById('uploadBtn').onclick=async()=>{
     const r=await fetch('/api/ingest',{method:'POST',headers:{'X-Admin-Key':key},body:fd});
     const d=await r.json(); if(!r.ok) throw new Error(typeof d.detail==='string'?d.detail:JSON.stringify(d.detail||'Upload failed'));
     const warningText=d.warnings?.length?`\nWarnings: ${d.warnings.join(' ')}`:'';
-    status.textContent=`Indexed ${d.file}: ${d.chunks} chunks from ${d.pages} page(s).${warningText}`;
+    const visionStatus=d.vision_analysis_status||d.vision_status||'unknown';
+    const visionLabel={completed:'complete',partial:'partial',failed:'failed',not_configured:'not configured',not_needed:'not needed'}[visionStatus]||visionStatus;
+    const textLabel=d.text_ocr_index_status==='completed'?`${d.text_ocr_chunks} text/OCR chunk(s) indexed`:'no text/OCR chunks';
+    status.textContent=`Indexed ${d.file}: ${d.chunks} chunks from ${d.pages} page(s). Searchable content indexing: ${d.document_index_status||'completed'}. ${textLabel}. Visual analysis: ${visionLabel}.${warningText}`;
   }catch(e){status.textContent=`Error: ${e.message}`;}
 };

@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import io
+import logging
 import math
 import re
 import unicodedata
@@ -27,6 +28,7 @@ from app.core.config import get_settings
 SUPPORTED = {".pdf", ".txt", ".md", ".docx"}
 OCRProvider = Callable[[bytes], str]
 VisionProvider = Callable[[bytes, int, str], str]
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -39,6 +41,7 @@ class IngestionResult:
     page_count: int = 1
     ocr_pages: list[int] = field(default_factory=list)
     vision_pages: list[int] = field(default_factory=list)
+    vision_failed_pages: list[int] = field(default_factory=list)
     visual_pages_detected: list[int] = field(default_factory=list)
     vision_status: str = "not_needed"
     warnings: list[str] = field(default_factory=list)
@@ -50,6 +53,16 @@ class IngestionResult:
 
 class IngestionError(ValueError):
     """Raised when the input cannot be read as its declared document type."""
+
+
+class VisionAnalysisFailure(ValueError):
+    """Vision failure tagged with the phase that produced it."""
+
+    def __init__(self, stage: str, original: Exception, response_summary: dict | None = None):
+        self.stage = stage
+        self.original = original
+        self.response_summary = response_summary
+        super().__init__(str(original))
 
 
 def stable_document_id(filename: str) -> str:
@@ -153,23 +166,33 @@ def _default_vision_provider(settings) -> VisionProvider | None:
                 },
             ]
         )
-        response = model.invoke([message])
-        content = response.content
-        if isinstance(content, str):
-            description = content.strip()
-        elif isinstance(content, list):
-            description = "\n".join(
-                str(part.get("text", "")).strip()
-                for part in content
-                if isinstance(part, dict)
-                and part.get("type") in {"text", "output_text"}
-                and part.get("text")
-            ).strip()
-        else:
-            description = ""
-        if not description:
-            raise ValueError("Vision provider returned an empty or malformed response")
-        return description
+        try:
+            response = model.invoke([message])
+        except Exception as exc:
+            raise VisionAnalysisFailure("provider_request", exc) from exc
+
+        content = getattr(response, "content", None)
+        response_summary = _response_shape(content)
+        try:
+            if isinstance(content, str):
+                description = content.strip()
+            elif isinstance(content, list):
+                description = "\n".join(
+                    str(part.get("text", "")).strip()
+                    for part in content
+                    if isinstance(part, dict)
+                    and part.get("type") in {"text", "output_text"}
+                    and part.get("text")
+                ).strip()
+            else:
+                description = ""
+            if not description:
+                raise ValueError("Vision provider returned an empty or malformed response")
+            return description
+        except Exception as exc:
+            raise VisionAnalysisFailure(
+                "response_parsing", exc, response_summary=response_summary
+            ) from exc
 
     return describe
 
@@ -191,6 +214,92 @@ def _safe_provider_error(exc: Exception) -> str:
     if status is not None:
         return f"{type(exc).__name__} (HTTP {status})"
     return type(exc).__name__
+
+
+def _response_shape(content: object) -> dict[str, object]:
+    """Describe response structure only; never include returned text or image data."""
+    if isinstance(content, str):
+        return {"content_kind": "text", "content_length": len(content)}
+    if isinstance(content, list):
+        return {
+            "content_kind": "parts",
+            "part_count": len(content),
+            "part_types": [
+                part_type
+                if isinstance(part_type, str)
+                and part_type in {"text", "output_text", "image", "refusal"}
+                else "other"
+                for part in content[:12]
+                if isinstance(part, dict)
+                for part_type in [part.get("type")]
+            ],
+        }
+    return {"content_kind": type(content).__name__ if content is not None else "missing"}
+
+
+def _sanitize_diagnostic_message(message: object, sensitive_values: tuple[str, ...] = ()) -> str:
+    """Bound diagnostics and remove common credential, data URL, and base64 forms."""
+    text = str(message or "").replace("\r", " ").replace("\n", " ")
+    for value in sensitive_values:
+        if value:
+            text = text.replace(value, "[REDACTED]")
+    patterns = (
+        (r"(?i)bearer\s+[A-Za-z0-9._~+/=-]+", "Bearer [REDACTED]"),
+        (r"(?i)\b(?:sk-or-v1-|sk-|or-v1-)[A-Za-z0-9_-]{8,}", "[REDACTED_KEY]"),
+        (r"(?i)(?:api[_ -]?key|authorization|password|access[_ -]?token)\s*[:=]\s*[^\s,;]+", "[REDACTED_CREDENTIAL]"),
+        (r"data:image/[^;\s]+;base64,[A-Za-z0-9+/=]+", "data:image/[REDACTED]"),
+        (r"(?<![A-Za-z0-9])[A-Za-z0-9+/]{120,}={0,2}(?![A-Za-z0-9])", "[REDACTED_DATA]"),
+        (r"(?i)secret[-_ ]?key", "[REDACTED]"),
+    )
+    for pattern, replacement in patterns:
+        text = re.sub(pattern, replacement, text)
+    return text[:300] + ("..." if len(text) > 300 else "")
+
+
+def _provider_error_details(
+    exc: Exception, sensitive_values: tuple[str, ...] = ()
+) -> tuple[int | None, dict[str, str]]:
+    response = getattr(exc, "response", None)
+    status = getattr(response, "status_code", None)
+    if status is None:
+        status = getattr(exc, "status_code", None)
+    details: dict[str, str] = {}
+    # Only allowlisted error fields are retained. Headers and request/response
+    # bodies are deliberately never logged.
+    body = getattr(exc, "body", None)
+    error = body.get("error") if isinstance(body, dict) else None
+    if isinstance(error, dict):
+        for field_name in ("code", "type", "message"):
+            value = error.get(field_name)
+            if value is not None:
+                details[field_name] = _sanitize_diagnostic_message(value, sensitive_values)
+    return (int(status) if isinstance(status, int) else None), details
+
+
+def _log_vision_failure(
+    *, document_id: str, page_number: int, stage: str, exc: Exception,
+    response_summary: dict | None = None, sensitive_values: tuple[str, ...] = (),
+) -> tuple[int | None, str]:
+    original = exc.original if isinstance(exc, VisionAnalysisFailure) else exc
+    if isinstance(exc, VisionAnalysisFailure):
+        stage = exc.stage
+        response_summary = exc.response_summary or response_summary
+    status, provider_response = _provider_error_details(original, sensitive_values)
+    message = _sanitize_diagnostic_message(str(original), sensitive_values)
+    logger.warning(
+        "PDF vision analysis failed",
+        extra={
+            "event": "pdf_vision_analysis_failed",
+            "document_id": document_id,
+            "page": page_number,
+            "failed_stage": stage,
+            "exception_type": type(original).__name__,
+            "exception_message": message,
+            "provider_status": status,
+            "provider_response": provider_response or response_summary,
+        },
+    )
+    return status, message
 
 
 def _render_page(
@@ -246,6 +355,7 @@ def _pdf_documents(
     warnings: list[str],
     ocr_pages: list[int],
     vision_pages: list[int],
+    vision_failed_pages: list[int],
     ocr_provider: OCRProvider | None,
     vision_provider: VisionProvider | None,
 ) -> tuple[list[Document], int]:
@@ -449,9 +559,25 @@ def _pdf_documents(
                             )
                         )
                     except Exception as exc:
+                        _log_vision_failure(
+                            document_id=str(base["document_id"]),
+                            page_number=page_number,
+                            stage="image_preprocessing",
+                            exc=exc,
+                            sensitive_values=(
+                                settings.vision_api_key.strip(),
+                                settings.openrouter_api_key.strip(),
+                                str(base["source_filename"]),
+                            ),
+                        )
+                        vision_failed_pages.append(page_number)
+                        safe_message = _sanitize_diagnostic_message(
+                            str(exc),
+                            (settings.vision_api_key.strip(), settings.openrouter_api_key.strip()),
+                        )
                         warnings.append(
-                            f"Page {page_number}: rendering for visual analysis failed "
-                            f"({type(exc).__name__}: {exc})."
+                            f"Page {page_number}: image preprocessing failed ({safe_message}); "
+                            "text/OCR content was retained."
                         )
                 else:
                     if settings.vision_model.strip() and not (
@@ -480,9 +606,16 @@ def _pdf_documents(
             )
         for page_number, rendered_page, visual_type in visual_candidates[:max_vision_pages]:
             try:
-                description = vision_provider(
+                raw_description = vision_provider(
                     rendered_page, page_number, str(base["source_filename"])
-                ).strip()
+                )
+                if not isinstance(raw_description, str):
+                    raise VisionAnalysisFailure(
+                        "response_parsing",
+                        ValueError("Vision provider returned a non-text description"),
+                        response_summary=_response_shape(raw_description),
+                    )
+                description = raw_description.strip()
                 if description:
                     docs.append(
                         Document(
@@ -502,11 +635,41 @@ def _pdf_documents(
                     )
                     vision_pages.append(page_number)
                 else:
-                    warnings.append(f"Page {page_number}: vision model returned no description.")
+                    error = ValueError("Vision provider returned an empty or malformed response")
+                    _log_vision_failure(
+                        document_id=str(base["document_id"]), page_number=page_number,
+                        stage="response_parsing", exc=error,
+                        response_summary={"content_kind": "empty_description"},
+                    )
+                    vision_failed_pages.append(page_number)
+                    warnings.append(
+                        f"Page {page_number}: vision response parsing failed "
+                        "(provider returned an empty or malformed response); "
+                        "text/OCR content was retained."
+                    )
             except Exception as exc:
+                status, _ = _log_vision_failure(
+                    document_id=str(base["document_id"]),
+                    page_number=page_number,
+                    stage="provider_request",
+                    exc=exc,
+                    sensitive_values=(
+                        settings.vision_api_key.strip(),
+                        settings.openrouter_api_key.strip(),
+                        str(base["source_filename"]),
+                    ),
+                )
+                vision_failed_pages.append(page_number)
+                if isinstance(exc, VisionAnalysisFailure) and exc.stage == "response_parsing":
+                    category = "vision response parsing failed"
+                    detail = "provider returned an empty or malformed response"
+                else:
+                    category = "vision provider request failed"
+                    detail = type(exc.original if isinstance(exc, VisionAnalysisFailure) else exc).__name__
+                    if status is not None:
+                        detail += f", HTTP {status}"
                 warnings.append(
-                    f"Page {page_number}: vision analysis failed "
-                    f"({_safe_provider_error(exc)}); text/OCR content was retained."
+                    f"Page {page_number}: {category} ({detail}); text/OCR content was retained."
                 )
 
         return docs, pdf.page_count, visual_pages_detected
@@ -607,6 +770,7 @@ def ingest_file(
     warnings: list[str] = []
     ocr_pages: list[int] = []
     vision_pages: list[int] = []
+    vision_failed_pages: list[int] = []
     visual_pages_detected: list[int] = []
 
     try:
@@ -636,6 +800,7 @@ def ingest_file(
             warnings,
             ocr_pages,
             vision_pages,
+            vision_failed_pages,
             active_ocr,
             active_vision,
         )
@@ -649,6 +814,8 @@ def ingest_file(
         vision_status = "not_configured"
     elif len(vision_pages) == len(visual_pages_detected):
         vision_status = "completed"
+    elif vision_failed_pages and len(set(vision_failed_pages)) >= len(visual_pages_detected):
+        vision_status = "failed"
     else:
         vision_status = "partial"
 
@@ -666,6 +833,7 @@ def ingest_file(
         page_count=page_count,
         ocr_pages=sorted(set(ocr_pages)),
         vision_pages=sorted(set(vision_pages)),
+        vision_failed_pages=sorted(set(vision_failed_pages)),
         visual_pages_detected=sorted(set(visual_pages_detected)),
         vision_status=vision_status,
         warnings=warnings,
