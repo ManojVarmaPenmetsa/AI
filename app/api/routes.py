@@ -1,9 +1,11 @@
 import secrets
 import re
 import logging
+from time import perf_counter
+from urllib.parse import urlsplit, urlunsplit
 from pathlib import Path
 
-from fastapi import APIRouter, UploadFile, File, Form, HTTPException, Header, Request, Response
+from fastapi import APIRouter, UploadFile, File, Form, HTTPException, Header, Request, Response, Query
 from pydantic import BaseModel, Field
 from starlette.concurrency import run_in_threadpool
 from app.core.config import get_settings
@@ -18,6 +20,7 @@ from app.services.ingestion import (
 )
 from app.services.document_registry import AmbiguousDocumentError
 from app.services.document_replacement import ReplacementError, replace_document
+from app.services import audit as audit_service
 from app.services.audit import write_audit, write_ingestion_audit
 from app.services.conversations import (
     create_conversation,
@@ -45,6 +48,8 @@ async def _audit_ingestion_safely(
     status: str,
     vision_status: str,
     diagnostics: list[str],
+    *, request_id: str | None = None, latency_ms: float | None = None,
+    error_category: str | None = None,
 ) -> None:
     try:
         await run_in_threadpool(
@@ -55,9 +60,53 @@ async def _audit_ingestion_safely(
             status,
             vision_status,
             diagnostics,
+            request_id=request_id,
+            latency_ms=latency_ms,
+            error_category=error_category,
         )
     except Exception as exc:
         logger.warning("Could not write ingestion audit record (%s)", type(exc).__name__)
+
+
+def _write_query_audit_safely(*args, **kwargs) -> None:
+    try:
+        write_audit(*args, **kwargs)
+    except Exception as exc:
+        logger.warning("Could not write query audit record (%s)", type(exc).__name__)
+
+
+def _safe_trace(trace: list[str]) -> list[str]:
+    """Keep workflow stage labels but exclude rewritten or user-derived query text."""
+    return ["Query rewrite" if item.startswith("Query rewrite") else item for item in trace]
+
+
+def _safe_web_references(citations: list[dict]) -> list[dict[str, str]]:
+    references = []
+    for citation in citations:
+        if not isinstance(citation, dict) or citation.get("type") != "web" or not citation.get("url"):
+            continue
+        try:
+            parts = urlsplit(str(citation["url"]))
+            if parts.scheme not in {"http", "https"} or not parts.hostname:
+                continue
+            host = parts.hostname
+            if parts.port:
+                host += f":{parts.port}"
+            references.append({
+                "title": str(citation.get("title") or host)[:300],
+                "url": urlunsplit((parts.scheme, host, parts.path, "", "")),
+                "type": "web",
+            })
+        except (TypeError, ValueError):
+            continue
+    return references
+
+
+def _require_admin(x_admin_key: str) -> None:
+    if not settings.admin_api_key:
+        raise HTTPException(status_code=503, detail="Audit inspection is not configured")
+    if not secrets.compare_digest(x_admin_key, settings.admin_api_key):
+        raise HTTPException(status_code=401, detail="Invalid admin key")
 
 
 def get_owner_token(request: Request, response: Response, *, create: bool) -> str | None:
@@ -82,6 +131,75 @@ def get_owner_token(request: Request, response: Response, *, create: bool) -> st
 @router.get("/health")
 def health():
     return {"status": "ok", "service": settings.app_name}
+
+
+@router.get("/admin/audit")
+async def inspect_audit(
+    request: Request,
+    x_admin_key: str = Header(default=""),
+    limit: int = Query(default=50, ge=1, le=100),
+    offset: int = Query(default=0, ge=0),
+    conversation_id: str | None = None,
+    request_id: str | None = None,
+    outcome: str | None = None,
+    selected_route: str | None = None,
+    from_ts: str | None = None,
+    to_ts: str | None = None,
+):
+    _require_admin(x_admin_key)
+    try:
+        return await run_in_threadpool(
+            audit_service.list_query_audit, limit=limit, offset=offset,
+            conversation_id=conversation_id, request_id=request_id, outcome=outcome,
+            selected_route=selected_route, from_ts=from_ts, to_ts=to_ts,
+        )
+    except Exception as exc:
+        logger.warning("Audit history query failed request_id=%s (%s)", request.state.request_id, type(exc).__name__)
+        raise HTTPException(status_code=503, detail=f"Audit history is temporarily unavailable. Request ID: {request.state.request_id}") from exc
+
+
+@router.get("/admin/audit/metrics")
+async def inspect_audit_metrics(
+    request: Request,
+    x_admin_key: str = Header(default=""),
+    from_ts: str | None = None,
+    to_ts: str | None = None,
+    outcome: str | None = None,
+    selected_route: str | None = None,
+):
+    _require_admin(x_admin_key)
+    try:
+        return await run_in_threadpool(
+            audit_service.audit_metrics, from_ts=from_ts, to_ts=to_ts,
+            outcome=outcome, selected_route=selected_route,
+        )
+    except Exception as exc:
+        logger.warning("Audit metrics query failed request_id=%s (%s)", request.state.request_id, type(exc).__name__)
+        raise HTTPException(status_code=503, detail=f"Audit metrics are temporarily unavailable. Request ID: {request.state.request_id}") from exc
+
+
+@router.get("/admin/audit/ingestion")
+async def inspect_ingestion_audit(
+    request: Request,
+    x_admin_key: str = Header(default=""),
+    limit: int = Query(default=50, ge=1, le=100),
+    offset: int = Query(default=0, ge=0),
+    document_id: str | None = None,
+    request_id: str | None = None,
+    status: str | None = None,
+    from_ts: str | None = None,
+    to_ts: str | None = None,
+):
+    _require_admin(x_admin_key)
+    try:
+        return await run_in_threadpool(
+            audit_service.list_ingestion_audit, limit=limit, offset=offset,
+            document_id=document_id, request_id=request_id, status=status,
+            from_ts=from_ts, to_ts=to_ts,
+        )
+    except Exception as exc:
+        logger.warning("Ingestion audit query failed request_id=%s (%s)", request.state.request_id, type(exc).__name__)
+        raise HTTPException(status_code=503, detail=f"Ingestion audit is temporarily unavailable. Request ID: {request.state.request_id}") from exc
 
 
 @router.post("/conversations", status_code=201)
@@ -109,6 +227,9 @@ def resume_conversation(conversation_id: str, request: Request, response: Respon
 
 @router.post("/chat")
 def chat(payload: ChatRequest, request: Request, response: Response):
+    started = perf_counter()
+    conversation_id: str | None = payload.conversation_id
+    request_id = request.state.request_id
     try:
         owner = get_owner_token(
             request, response, create=payload.conversation_id is None
@@ -129,7 +250,28 @@ def chat(payload: ChatRequest, request: Request, response: Response):
                 thread_id=conversation_id,
                 graph=request.app.state.agent_graph,
             )
-        write_audit(payload.question, result["source_used"], result.get("trace", []))
+        source_used = result["source_used"]
+        references = result.get("retrieval_results", [])
+        supporting_ids = set(result.get("kb_supporting_chunk_ids", []))
+        evidence = {
+            "kb_grade": result.get("kb_grade"),
+            "web_grade": result.get("web_grade"),
+            "supporting_chunk_ids": sorted(supporting_ids),
+            "web_references": _safe_web_references(result.get("citations", [])),
+        }
+        _write_query_audit_safely(
+            payload.question, source_used, _safe_trace(result.get("trace", [])),
+            request_id=request_id, conversation_id=conversation_id,
+            outcome="insufficient_evidence" if source_used == "insufficient_evidence" else "answered",
+            selected_route=result.get("selected_route"),
+            retrieval_results=references,
+            evidence=evidence,
+            web_fallback=source_used == "web_search" or any("Web fallback" in item for item in result.get("trace", [])),
+            query_rewrite_count=result.get("query_rewrite_count", 0),
+            retry_count=result.get("retry_count", 0),
+            latency_ms=(perf_counter() - started) * 1000,
+            stage_timings_ms=result.get("stage_timings_ms", {}),
+        )
 
         return {
             "answer": result["answer"],
@@ -144,7 +286,17 @@ def chat(payload: ChatRequest, request: Request, response: Response):
         raise
     except Exception as exc:
         status_code = 400 if isinstance(exc, ValueError) else 500
-        raise HTTPException(status_code=status_code, detail=str(exc)) from exc
+        _write_query_audit_safely(
+            payload.question, "failed", [], request_id=request_id,
+            conversation_id=conversation_id, outcome="failed",
+            latency_ms=(perf_counter() - started) * 1000,
+            error_category=type(exc).__name__, diagnostics=["workflow_execution_failed"],
+        )
+        logger.warning("Chat request failed request_id=%s category=%s", request_id, type(exc).__name__)
+        detail = "The request could not be completed."
+        if status_code == 500:
+            detail += f" Reference request ID: {request_id}"
+        raise HTTPException(status_code=status_code, detail=detail) from exc
 
 
 
@@ -156,6 +308,8 @@ async def ingest(
     new_document: bool = Form(default=False),
     x_admin_key: str = Header(default=""),
 ):
+    started = perf_counter()
+    request_id = request.state.request_id
     if not settings.admin_api_key:
         raise HTTPException(status_code=503, detail="Document upload is not configured")
     if not secrets.compare_digest(x_admin_key, settings.admin_api_key):
@@ -206,18 +360,33 @@ async def ingest(
         ids = replacement["ids"]
     except ReplacementError as exc:
         await _audit_ingestion_safely(
-            document_id, original_filename, version, "failed", "not_processed", [exc.stage],
+            document_id, original_filename, version, "failed", "not_processed", [f"stage:{exc.stage}"],
+            request_id=request_id,
+            latency_ms=(perf_counter() - started) * 1000,
+            error_category=exc.stage,
         )
         code = 502 if exc.stage in {"upsert", "activation", "cleanup"} else 422
         raise HTTPException(
             status_code=code,
             detail={
-                "message": str(exc),
+                "message": f"Document ingestion failed during {exc.stage}.",
                 "document_id": document_id,
                 "generation_id": exc.generation_id,
                 "stage": exc.stage,
                 "previous_generation_remains_active": exc.stage != "cleanup",
             },
+        ) from exc
+    except Exception as exc:
+        await _audit_ingestion_safely(
+            document_id, original_filename, version, "failed", "not_processed",
+            ["stage:unexpected"], request_id=request_id,
+            latency_ms=(perf_counter() - started) * 1000,
+            error_category=type(exc).__name__,
+        )
+        logger.warning("Document ingestion failed request_id=%s category=%s", request_id, type(exc).__name__)
+        raise HTTPException(
+            status_code=500,
+            detail=f"Document ingestion failed. Reference request ID: {request_id}",
         ) from exc
     warnings = replacement["warnings"]
     text_ocr_types = {"text", "table", "ocr", "screenshot_ocr"}
@@ -231,6 +400,9 @@ async def ingest(
         "partial" if warnings or replacement["cleanup_pending"] else "completed",
         result.vision_status,
         warnings,
+        request_id=request_id,
+        latency_ms=(perf_counter() - started) * 1000,
+        error_category=None,
     )
     return {
         "message": "Document indexed",

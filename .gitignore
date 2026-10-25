@@ -5,5 +5,6 @@ __pycache__/
 *.pyc
 *.pyo
 data/*.db
+evals/reports/*.json
 uploads/*
 !uploads/.gitkeep

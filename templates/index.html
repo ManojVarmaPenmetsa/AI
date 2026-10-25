@@ -10,9 +10,9 @@
   <div class="shell">
     <aside class="sidebar">
       <div>
-        <div class="brand-badge">FDE Project</div>
-        <h1>IT Support<br/>Agentic RAG</h1>
-        <p class="muted">Private company knowledge first. External web only when evidence is weak.</p>
+        <div class="brand-row"><div class="brand-mark" aria-hidden="true">N</div><div><div class="brand-badge">NOVACORE · IT</div><span class="brand-caption">Support workspace</span></div></div>
+        <h1>IT Support<br/>Copilot</h1>
+        <p class="muted">Answers grounded in company knowledge, with web search when needed.</p>
       </div>
 
       <div class="workflow-card">
@@ -25,8 +25,11 @@
         <div class="flow-step">6. Grounded answer</div>
       </div>
 
-      <button id="newConversation" class="secondary-btn">+ New Conversation</button>
-      <button id="openUpload" class="secondary-btn">+ Add Company Document</button>
+      <nav class="sidebar-actions" aria-label="Workspace actions">
+        <button id="newConversation" class="secondary-btn" aria-label="New conversation"><span aria-hidden="true">＋</span> New conversation</button>
+        <button id="openUpload" class="secondary-btn" aria-label="Add company document"><span aria-hidden="true">↥</span> Add company document</button>
+        <button id="openAudit" class="secondary-btn" aria-label="Open audit dashboard"><span aria-hidden="true">▤</span> Audit dashboard</button>
+      </nav>
     </aside>
 
     <main class="main">
@@ -35,36 +38,118 @@
           <span class="status-dot"></span>
           <span>Enterprise Knowledge Copilot</span>
         </div>
-        <span class="pill">Agentic RAG</span>
+        <span class="topbar-note"><span aria-hidden="true">⌘</span> Private knowledge first</span>
       </header>
+
+      <section id="auditDashboard" class="dashboard hidden" aria-label="Audit dashboard">
+        <div class="dashboard-heading">
+          <div>
+            <span class="eyebrow">ADMINISTRATION</span>
+            <h2>Request &amp; Ingestion Audit</h2>
+            <p class="muted">Operational records from this application. Question text is not shown.</p>
+          </div>
+          <button id="closeAudit" class="secondary-btn">Back to copilot</button>
+        </div>
+
+        <div class="dashboard-auth">
+          <div>
+            <label for="auditAdminKey">Admin API key</label>
+            <input id="auditAdminKey" type="password" autocomplete="off" placeholder="Enter admin key to load audit data" />
+          </div>
+          <button id="loadAudit" class="send-btn">Load dashboard</button>
+          <span id="auditStatus" class="audit-status" role="status" aria-live="polite">Enter the admin key to load live audit data.</span>
+        </div>
+
+        <form id="auditFilters" class="audit-filters">
+          <label>From <input id="auditFrom" type="date" /></label>
+          <label>To <input id="auditTo" type="date" /></label>
+          <label>Outcome
+            <select id="auditOutcome">
+              <option value="">All outcomes</option>
+              <option value="answered">Answered</option>
+              <option value="insufficient_evidence">Insufficient evidence</option>
+              <option value="failed">Failed</option>
+            </select>
+          </label>
+          <label>Workflow route
+            <select id="auditRoute">
+              <option value="">All routes</option>
+              <option value="kb">Private KB route</option>
+              <option value="direct">Direct response route</option>
+            </select>
+          </label>
+          <button type="submit" class="secondary-btn">Apply filters</button>
+          <button type="button" id="clearAuditFilters" class="secondary-btn">Clear</button>
+        </form>
+
+        <div class="metric-grid" aria-live="polite">
+          <article class="metric-card"><span>Total requests</span><strong id="metricTotal">—</strong></article>
+          <article class="metric-card"><span>Failure rate</span><strong id="metricFailureRate">—</strong></article>
+          <article class="metric-card"><span>Answered from private KB</span><strong id="metricPrivateKb">—</strong></article>
+          <article class="metric-card"><span>Web fallback</span><strong id="metricWeb">—</strong></article>
+          <article class="metric-card"><span>Insufficient evidence</span><strong id="metricInsufficient">—</strong></article>
+          <article class="metric-card"><span>Average latency</span><strong id="metricLatency">—</strong></article>
+        </div>
+
+        <div class="audit-two-column">
+          <section class="audit-panel">
+            <div class="panel-heading"><h3>Recent errors</h3><span>Requests and ingestion</span></div>
+            <div id="recentErrors" class="audit-list"><div class="empty">Load the dashboard to view errors.</div></div>
+          </section>
+          <section class="audit-panel">
+            <div class="panel-heading"><h3>Request details</h3><span>Select a request to inspect its timeline</span></div>
+            <div id="requestDetail" class="audit-detail"><div class="empty">No request selected.</div></div>
+          </section>
+        </div>
+
+        <section class="audit-panel table-panel">
+          <div class="panel-heading"><h3>Recent requests</h3><span id="requestCount">—</span></div>
+          <div class="table-scroll"><table>
+            <thead><tr><th>Time</th><th>Outcome</th><th>Route</th><th>Answer source</th><th>Latency</th><th>References</th><th></th></tr></thead>
+            <tbody id="requestRows"><tr><td colspan="7" class="empty-cell">Audit data has not been loaded.</td></tr></tbody>
+          </table></div>
+          <div class="table-footer"><button id="previousRequests" class="secondary-btn" disabled>Previous</button><span id="requestPage">Page 1</span><button id="nextRequests" class="secondary-btn" disabled>Next</button></div>
+        </section>
+
+        <section class="audit-panel table-panel">
+          <div class="panel-heading"><h3>Recent ingestion jobs</h3><span id="ingestionCount">—</span></div>
+          <div class="table-scroll"><table>
+            <thead><tr><th>Time</th><th>Document</th><th>Status</th><th>Visual analysis</th><th>Duration</th><th>Diagnostics</th></tr></thead>
+            <tbody id="ingestionRows"><tr><td colspan="6" class="empty-cell">Audit data has not been loaded.</td></tr></tbody>
+          </table></div>
+        </section>
+      </section>
 
       <section id="chat" class="chat-area">
         <div class="message assistant">
           <div class="avatar">AI</div>
           <div class="bubble">
-            <strong>How can I help with IT support?</strong>
-            <p>Try: “How do I connect to the company VPN?” or ask a question that may require current external vendor information.</p>
+            <span class="welcome-kicker">YOUR IT SUPPORT ASSISTANT</span>
+            <strong>How can I help today?</strong>
+            <p>Ask a question about company tools, policies, or troubleshooting. I’ll look for a reliable source before answering.</p>
           </div>
         </div>
       </section>
 
       <section class="composer-wrap">
         <div class="examples">
-          <button class="example">How do I connect to the company VPN?</button>
-          <button class="example">What is our password reset policy?</button>
-          <button class="example">What is the latest Microsoft Teams outage guidance?</button>
+          <span class="examples-label">Try asking</span>
+          <button class="example">Connect to the company VPN</button>
+          <button class="example">Password reset policy</button>
+          <button class="example">Latest Microsoft Teams outage guidance</button>
         </div>
         <form id="chatForm" class="composer">
-          <textarea id="question" rows="2" placeholder="Ask an IT support question..." required></textarea>
-          <button type="submit" class="send-btn">Ask Agent</button>
+          <textarea id="question" rows="1" aria-label="Your IT support question" placeholder="Message your IT support copilot..." required></textarea>
+          <button type="submit" class="send-btn"><span>Send</span><span aria-hidden="true">↑</span></button>
         </form>
+        <p class="composer-note">AI can make mistakes. Verify critical steps with your IT team.</p>
       </section>
     </main>
 
     <aside class="trace-panel">
       <h2>Agent Trace</h2>
       <p class="muted">Watch LangGraph decisions while the request runs.</p>
-      <div id="trace" class="trace-list"><div class="empty">No request yet.</div></div>
+      <div id="trace" class="trace-list" aria-live="polite"><div class="empty">No request yet.</div></div>
       <div class="source-box">
         <span>Final Source</span>
         <strong id="sourceUsed">—</strong>
@@ -72,14 +157,16 @@
     </aside>
   </div>
 
-  <div id="uploadModal" class="modal hidden">
+  <div id="uploadModal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="uploadTitle">
     <div class="modal-card">
-      <div class="modal-head"><h2>Ingest Company Document</h2><button id="closeUpload">×</button></div>
+      <div class="modal-head"><h2 id="uploadTitle">Add a company document</h2><button id="closeUpload" type="button" aria-label="Close upload dialog">×</button></div>
       <p class="muted">Upload PDF, TXT, Markdown, or DOCX. The document is chunked, embedded, and indexed into Pinecone.</p>
-      <input id="adminKey" type="password" placeholder="Admin API key" />
+      <label class="field-label" for="adminKey">Admin API key</label>
+      <input id="adminKey" type="password" autocomplete="current-password" placeholder="Enter your admin key" />
+      <label class="field-label" for="fileInput">Document file</label>
       <input id="fileInput" type="file" accept=".pdf,.txt,.md,.docx" />
-      <button id="uploadBtn" class="send-btn full">Index Document</button>
-      <div id="uploadStatus" class="upload-status"></div>
+      <button id="uploadBtn" type="button" class="send-btn full">Index document</button>
+      <div id="uploadStatus" class="upload-status" role="status" aria-live="polite"></div>
     </div>
   </div>
 

@@ -27,3 +27,7 @@ class AgentState(MessagesState, total=False):
     retry_count: int
     trace: List[str]
     citations: List[dict]
+    selected_route: str
+    retrieval_results: List[dict]
+    stage_timings_ms: dict[str, float]
+    query_rewrite_count: int

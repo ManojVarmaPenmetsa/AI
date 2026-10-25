@@ -1,0 +1,129 @@
+{
+  "dataset_version": "1.0.0",
+  "description": "Compact IT support and NovaCore multimodal retrieval regression set.",
+  "cases": [
+    {
+      "id": "vpn-split-tunnel",
+      "question": "How do I connect to the corporate VPN?",
+      "expected_facts": ["Open the company VPN client", "select the Corporate profile", "complete MFA"],
+      "expected_evidence": [{"source": "company_it_handbook.md", "page": null}],
+      "should_abstain": false,
+      "expected_source_used": "private_kb",
+      "offline": {"mock_answer": "Open the company VPN client, select the Corporate profile, and complete MFA.", "retrieved_chunks": [
+        {"text": "Open the company VPN client, select the Corporate profile, and complete MFA.", "support": true, "metadata": {"chunk_id": "vpn-1", "source": "company_it_handbook.md", "content_type": "text"}}
+      ]}
+    },
+    {
+      "id": "vpn-follow-up-context",
+      "question": "What if that doesn't work?",
+      "history": [{"role": "user", "content": "How do I connect to the corporate VPN?"}, {"role": "assistant", "content": "Open the company VPN client and select Corporate."}],
+      "retrieval_query": "Corporate VPN troubleshooting when connection fails",
+      "expected_facts": ["restart the VPN client", "contact the service desk"],
+      "expected_evidence": [{"source": "service_desk_runbook.md", "page": null}],
+      "should_abstain": false,
+      "expected_source_used": "private_kb",
+      "offline": {"mock_answer": "Restart the VPN client; if it still fails, contact the service desk.", "retrieved_chunks": [
+        {"text": "Restart the VPN client. If the VPN still fails, contact the service desk.", "support": true, "metadata": {"chunk_id": "vpn-follow-1", "source": "service_desk_runbook.md", "content_type": "text"}}
+      ]}
+    },
+    {
+      "id": "department-map-engineering",
+      "question": "According to the department map, which role reports to the Engineering department?",
+      "expected_facts": ["Reliability Lead reports to Engineering"],
+      "expected_evidence": [{"source": "NovaCore_Multimodal_Test_Handbook.pdf", "page": 2}],
+      "should_abstain": false,
+      "expected_source_used": "private_kb",
+      "offline": {"mock_answer": "The Reliability Lead reports to Engineering.", "retrieved_chunks": [
+        {"text": "Suggested questions: which role reports to Engineering?", "support": false, "metadata": {"chunk_id": "map-misleading", "source_filename": "NovaCore_Multimodal_Test_Handbook.pdf", "page": 6, "content_type": "text"}},
+        {"text": "Department map: Reliability Lead reports to Engineering. AI Evaluation Lead reports to AI & Data.", "support": true, "metadata": {"chunk_id": "map-visual-2", "source_filename": "NovaCore_Multimodal_Test_Handbook.pdf", "page": 2, "content_type": "diagram_description"}}
+      ]}
+    },
+    {
+      "id": "department-map-ai-data",
+      "question": "Which role reports to the AI & Data department?",
+      "expected_facts": ["AI Evaluation Lead reports to AI & Data"],
+      "expected_evidence": [{"source": "NovaCore_Multimodal_Test_Handbook.pdf", "page": 2}],
+      "should_abstain": false,
+      "expected_source_used": "private_kb",
+      "offline": {"mock_answer": "The AI Evaluation Lead reports to AI & Data.", "retrieved_chunks": [
+        {"text": "AI Evaluation Lead reports to AI & Data.", "support": true, "metadata": {"chunk_id": "map-visual-3", "source_filename": "NovaCore_Multimodal_Test_Handbook.pdf", "page": 2, "content_type": "diagram_description"}},
+        {"text": "Suggested questions about company departments.", "support": false, "metadata": {"chunk_id": "map-misleading-2", "source_filename": "NovaCore_Multimodal_Test_Handbook.pdf", "page": 6, "content_type": "text"}}
+      ]}
+    },
+    {
+      "id": "checkout-diagram-circuit-breaker",
+      "question": "Is the checkout diagram's circuit breaker enabled?",
+      "expected_facts": ["circuit breaker is disabled"],
+      "expected_evidence": [{"source": "NovaCore_Multimodal_Test_Handbook.pdf", "page": 3}],
+      "should_abstain": false,
+      "expected_source_used": "private_kb",
+      "offline": {"mock_answer": "The circuit breaker is disabled.", "retrieved_chunks": [
+        {"text": "The incident diagram states circuit breaker: DISABLED.", "support": true, "metadata": {"chunk_id": "checkout-visual-3", "source_filename": "NovaCore_Multimodal_Test_Handbook.pdf", "page": 3, "content_type": "diagram_description"}}
+      ]}
+    },
+    {
+      "id": "cloud-cost-chart-lowest",
+      "question": "Which team had the lowest Q2 cloud cost in the chart?",
+      "expected_facts": ["Research Lab", "$38,000"],
+      "expected_evidence": [{"source": "NovaCore_Multimodal_Test_Handbook.pdf", "page": 4}],
+      "should_abstain": false,
+      "expected_source_used": "private_kb",
+      "offline": {"mock_answer": "Research Lab had the lowest Q2 cloud cost at $38,000.", "retrieved_chunks": [
+        {"text": "Visual-only chart detail: Research Lab is the lowest-cost team at $38,000.", "support": true, "metadata": {"chunk_id": "cost-chart-4", "source_filename": "NovaCore_Multimodal_Test_Handbook.pdf", "page": 4, "content_type": "screenshot_description"}}
+      ]}
+    },
+    {
+      "id": "operations-screenshot-owner",
+      "question": "Who owns incident INC-2048 according to the operations screenshot?",
+      "expected_facts": ["Priya Nair"],
+      "expected_evidence": [{"source": "NovaCore_Multimodal_Test_Handbook.pdf", "page": 5}],
+      "should_abstain": false,
+      "expected_source_used": "private_kb",
+      "offline": {"mock_answer": "The incident owner is Priya Nair.", "retrieved_chunks": [
+        {"text": "Visual-only test detail: incident owner is Priya Nair; rollback completion was 14:26.", "support": true, "metadata": {"chunk_id": "incident-screen-5", "source_filename": "NovaCore_Multimodal_Test_Handbook.pdf", "page": 5, "content_type": "screenshot_description"}}
+      ]}
+    },
+    {
+      "id": "public-vendor-web-fallback",
+      "question": "What is the latest stable Python release?",
+      "expected_facts": [],
+      "expected_evidence": [],
+      "should_abstain": false,
+      "expected_source_used": "web_search",
+      "offline": {"mock_answer": "The public vendor website lists the current stable release; verify it on python.org.", "retrieved_chunks": [
+        {"text": "Unrelated internal ticket priority policy.", "support": false, "metadata": {"chunk_id": "irrelevant-python", "source": "service_desk_runbook.md", "content_type": "text"}}
+      ]}
+    },
+    {
+      "id": "missing-evidence-abstain",
+      "question": "What is the internal code name of the unannounced payroll migration?",
+      "expected_facts": [],
+      "expected_evidence": [],
+      "should_abstain": true,
+      "expected_source_used": "insufficient_evidence",
+      "offline": {"mock_answer": "", "retrieved_chunks": []}
+    },
+    {
+      "id": "contradictory-evidence-abstain",
+      "question": "Which of two conflicting maintenance windows is approved?",
+      "expected_facts": [],
+      "expected_evidence": [],
+      "should_abstain": true,
+      "expected_source_used": "insufficient_evidence",
+      "offline": {"mock_answer": "", "retrieved_chunks": [
+        {"text": "Window A says Tuesday; another source says Thursday and neither is authoritative.", "support": false, "metadata": {"chunk_id": "conflict-1", "source": "maintenance.md", "content_type": "text"}}
+      ]}
+    },
+    {
+      "id": "unsupported-question-abstain",
+      "question": "How many moons does the user's private laptop have?",
+      "expected_facts": [],
+      "expected_evidence": [],
+      "should_abstain": true,
+      "expected_source_used": "insufficient_evidence",
+      "offline": {"mock_answer": "", "retrieved_chunks": [
+        {"text": "Unrelated device setup instructions.", "support": false, "metadata": {"chunk_id": "misleading-moons", "source": "device_setup.md", "content_type": "text"}}
+      ]}
+    }
+  ]
+}

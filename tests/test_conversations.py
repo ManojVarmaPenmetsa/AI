@@ -27,8 +27,9 @@ class FakeLLM:
         return FakeRouter()
 
     def invoke(self, prompt):
-        self.prompts.append(prompt)
-        if "Rewrite the latest user message" in prompt:
+        text = "\n".join(str(getattr(message, "content", message)) for message in prompt) if isinstance(prompt, list) else str(prompt)
+        self.prompts.append(text)
+        if "Rewrite the latest message" in text:
             return AIMessage(content="resolved standalone follow-up")
         return AIMessage(content="A stable mocked answer")
 

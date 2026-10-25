@@ -180,6 +180,25 @@ To try PDF ingestion locally, set `OPENROUTER_API_KEY` and `ADMIN_API_KEY` in th
 
 Ingestion audit records store document identifiers, version, status, vision status, and safe warning diagnostics. They do not store document text, image payloads, API keys, or model responses.
 
+## Audit history
+
+`audit.db` remains separate from conversation ownership/history and the LangGraph checkpoint database. Chat records include a generated request ID, conversation ID, outcome (`answered`, `insufficient_evidence`, or `failed`), route, source/page/chunk references, evidence grades, web fallback flag, rewrite/retry counts, total latency, and workflow node timings. New audit rows do not retain the question text; they retain only its character count. Query rewriting traces are stored as stage labels, without rewritten text. Ingestion records include status, request ID, duration, vision status, error category, and safe diagnostics.
+
+On startup, `init_db()` applies an additive SQLite migration to the existing audit tables and creates indexes for timestamp, request, conversation, outcome, route, document, and ingestion status filters. Existing rows remain in place. For inspection, configure `ADMIN_API_KEY` and send it as `X-Admin-Key`:
+
+The copilot page includes an **Audit Dashboard** view that requests these same protected endpoints. Enter the admin key in the dashboard to load actual backend records; the key is held only in the current page session. It shows request totals, failure rate, private-KB answers, web fallback, insufficient-evidence outcomes, average latency, recent request/ingestion errors, source/page references, and per-request workflow timelines. Date, outcome, and workflow route filters are applied to the request metrics and history; ingestion history follows the date range. Loading, empty, and error states are shown explicitly.
+
+```powershell
+Invoke-RestMethod -Headers @{"X-Admin-Key"="<ADMIN_API_KEY>"} `
+  "http://127.0.0.1:8080/api/admin/audit?limit=50&outcome=insufficient_evidence"
+Invoke-RestMethod -Headers @{"X-Admin-Key"="<ADMIN_API_KEY>"} `
+  "http://127.0.0.1:8080/api/admin/audit/ingestion?status=failed"
+Invoke-RestMethod -Headers @{"X-Admin-Key"="<ADMIN_API_KEY>"} `
+  "http://127.0.0.1:8080/api/admin/audit/metrics"
+```
+
+History supports pagination and filters for conversation/request/outcome or ingestion document/status, plus ISO timestamp bounds `from_ts` and `to_ts`. Metrics separate successfully answered requests from insufficient-evidence and failed requests. Keep the audit database access-controlled and apply an appropriate retention policy; legacy rows retain the question text they already stored, but audit inspection endpoints do not return that legacy text.
+
 The document registry is stored in `DOCUMENT_REGISTRY_DB_PATH` (default `data/document_registry.db`), separately from conversations and audit records. It assigns durable document identities, tracks ingestion generations, and records which fully verified generation is active. Uploads are parsed and chunked, upserted, fetched back by expected chunk IDs, and only then activated in a SQLite transaction. Retrieval filters to active generations and continues to include older vectors that have no generation metadata until a replacement for their document is activated. Failed or incomplete generations remain inactive. Cleanup after activation is restricted to the selected `document_id`; stale chunk IDs from a retried generation are recorded for cleanup recovery.
 
 The first upload for a filename adopts the previous filename hash as a migration bridge, then records it in the registry. Existing vectors are not reset or globally migrated. Reupload that filename to replace the registered document. To create a second logical document with the same filename, send the multipart form field `new_document=true`; subsequent updates must include that returned `document_id`. If a filename already has multiple registered documents, upload returns HTTP 409 with their IDs instead of guessing. The UI's normal upload remains unchanged for unambiguous filenames. `DELETE /api/ingest/{document_id}` using `X-Admin-Key` removes that document's vectors, records a registry tombstone so delayed legacy vectors stay hidden, and removes its versioned local uploads.
@@ -187,6 +206,29 @@ The first upload for a filename adopts the previous filename hash as a migration
 The registry and upload files must be on persistent storage and backed up together. SQLite locking is intended for a single-host app. Before running multiple app replicas, migrate the registry to a shared transactional database with cross-process advisory locking; the active pointer and Pinecone writes cannot participate in one distributed transaction. A process crash after activation but before cleanup is safe for retrieval: the registry continues to select the new generation and the next successful replacement retries document-scoped cleanup. Legacy vectors without `document_id` remain available for compatibility and require an explicit inventory/migration before they can be safely associated with a document.
 
 Every new chunk stores `document_id`, content-hash `document_version`, `generation_id`, `chunk_id`, source filename, page, content type, ingestion timestamp, provenance, and existing multimodal metadata. Chunk IDs are deterministic within a generation and include the generation ID, so changes in OCR or vision output produce distinct chunks. Private KB citations include page numbers so generated descriptions can be checked against the original PDF.
+
+## RAG evaluation
+
+The versioned, compact dataset is `evals/dataset.json`. It covers private-KB facts, contextual follow-ups, PDF diagrams/charts/screenshots, web fallback, misleading retrieval candidates, missing or conflicting evidence, and abstention. Each case records expected facts, source/page evidence, and whether the graph should abstain. Add a case there and run the offline evaluator before relying on it; dataset validation checks required fields, unique IDs, evidence page types, and fixture shape.
+
+Run the deterministic no-provider evaluation (default) and the ordinary unit suite with:
+
+```powershell
+.\.conda_env\python.exe evaluate_rag.py
+.\.conda_env\python.exe -m unittest discover -s tests -v
+```
+
+The runner invokes the existing `workflow.build_graph()` and injects fixture retrieval, model, and web-search responses in offline mode. It does not initialize Pinecone or call OpenRouter/Tavily. Results are written to `evals/reports/rag_eval_<UTC timestamp>.json` (ignored by git so local run artifacts do not accumulate in commits); stdout lists metric values and failed case IDs. The report records dataset version, safe configuration and model identifiers. It excludes raw prompts, answers, retrieved text, and credentials.
+
+Metrics are averaged only across cases with a defined denominator. Recall@5 is the fraction of expected source/page pairs present in the first five retrieved candidates; MRR is the reciprocal rank of the first expected pair. Citation precision is the share of emitted citations matching expected evidence; citation coverage is the share of expected source/pages cited. Answer correctness is the fraction of expected fact strings found in the normalized answer (a simple exact fact check, not semantic judging). Abstention precision/recall/accuracy compare insufficient-evidence outcomes against cases marked `should_abstain`. `null` means a metric was not measurable for that case set. Offline answer/citation scores use deterministic fixtures and are evaluator plumbing baselines; they do not measure provider quality.
+
+An optional real-provider evaluation requires deliberate opt-in and reads the index currently configured by the environment:
+
+```powershell
+.\.conda_env\python.exe evaluate_rag.py --mode live --confirm-live
+```
+
+This can consume embedding, OpenRouter, and Tavily usage. It verifies that the configured Pinecone index already exists and uses the existing retrieval/workflow path; it never creates an index, ingests documents, upserts, or deletes vectors. Ensure the configured namespace and document registry point to the intended non-production evaluation corpus before running it. Live results are not deterministic and should be interpreted as a snapshot of those providers and that corpus. No live evaluation is run by the regular test suite.
 
 ## Hosted data and security
 
