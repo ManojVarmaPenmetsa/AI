@@ -256,3 +256,57 @@ This can consume embedding, OpenRouter, and Tavily usage. It verifies that the c
 - Questions and retrieved context may be sent to OpenRouter; fallback searches are sent to Tavily; embeddings are computed locally and vectors are stored in Pinecone. Do not use confidential data unless these services are approved for it.
 - The sample handbook and runbook are demo content, not real company policy. Replace them with documents you are authorized to use.
 - This project is suitable for a managed deployment such as DigitalOcean, but it still requires review of identity/access controls, upload limits and validation, secrets management, logging, privacy, and operational monitoring before production use at scale.
+# DigitalOcean App Platform deployment (Dockerfile)
+
+Deploy the GitHub `main` branch as a Dockerfile app using the repository-root
+`Dockerfile`. Leave the build and run command overrides blank so App Platform
+uses the Dockerfile. The container serves HTTP on port `8080` and binds to
+`0.0.0.0`; configure the app's HTTP port as `8080`. The health endpoint is
+`/api/health`.
+
+The image installs `tesseract-ocr` and `tesseract-ocr-eng`, verifies the Linux
+binary and English language data during build, and defaults
+`TESSERACT_CMD=/usr/bin/tesseract`. Keep `OCR_PROVIDER=tesseract`. Leave
+`TESSERACT_CMD` unset in App Platform or set it to `/usr/bin/tesseract`; do not
+copy a Windows path from your local `.env`. The application reports an
+actionable OCR configuration error if the binary or English data is missing.
+OCR remains selective according to the existing PDF page and image heuristics.
+
+Configure these runtime variables in App Platform (use encrypted/secret values
+for credentials):
+
+- Required credentials: `OPENROUTER_API_KEY`, `PINECONE_API_KEY`,
+  `ADMIN_API_KEY`.
+- `TAVILY_API_KEY` is required when web search/fallback is enabled; set it for
+  the current application configuration.
+- Set `APP_ENV=production` and retain the existing `PINECONE_INDEX_NAME` and
+  `PINECONE_NAMESPACE` values used by your indexed data.
+- Preserve the existing model/provider configuration: `OPENROUTER_BASE_URL`,
+  `OPENROUTER_MODEL`, `VISION_PROVIDER`, `VISION_MODEL`, and any explicit
+  `VISION_API_KEY`/`VISION_BASE_URL` overrides. `VISION_API_KEY` may use the
+  OpenRouter key when no override is supplied.
+- Optional OCR and ingestion tuning variables include `OCR_PROVIDER`,
+  `TESSERACT_CMD`, `OCR_TIMEOUT_SECONDS`, `PDF_VISION_MAX_PAGES`,
+  `PDF_VISION_MIN_IMAGE_AREA_RATIO`, `PDF_VISION_MIN_DRAWINGS`,
+  `PDF_RENDER_DPI`, `PDF_VISION_MAX_PIXELS`, `PDF_VISION_MAX_IMAGE_BYTES`,
+  and `PDF_MIN_TEXT_WORDS`. Omit these to use application defaults.
+
+Do not commit `.env` files. `.env.example` contains placeholders only; copy the
+needed variable names into App Platform and enter actual secrets there.
+
+**Persistent data:** App Platform's container filesystem is ephemeral. This
+application keeps audit, conversation/checkpoint, and document registry SQLite
+databases under `data/`, and uploaded source files under `uploads/`. These files
+must be moved to durable storage before relying on them across redeployments or
+multiple instances. Pinecone vectors are remote; the local sample knowledge
+directory is repository content. DigitalOcean documents the storage options at
+[App Platform persistent data](https://docs.digitalocean.com/products/app-platform/how-to/store-data/).
+This deployment setup does not migrate the local databases or uploads.
+
+Local Docker smoke run (the explicit Linux path overrides any Windows value
+read from your local env file):
+
+```powershell
+docker build -t agentic-rag .
+docker run --rm -p 8080:8080 --env-file .conda_env/.env -e TESSERACT_CMD=/usr/bin/tesseract agentic-rag
+```

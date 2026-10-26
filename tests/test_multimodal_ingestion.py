@@ -4,17 +4,21 @@ import tempfile
 import unittest
 import base64
 import io
+import shutil
 import sqlite3
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
 import pymupdf as fitz
-from PIL import Image
+from PIL import Image, ImageDraw, ImageFont
 
+from app.core.config import get_settings
 from app.services.ingestion import (
     IngestionError,
+    OCRConfigurationError,
     _default_vision_provider,
+    _default_ocr_provider,
     _normalize_openai_compatible_base_url,
     _render_page,
     chunk_documents,
@@ -50,6 +54,81 @@ def test_settings(**overrides):
 
 
 class MultimodalIngestionTests(unittest.TestCase):
+    @staticmethod
+    def _sample_ocr_image() -> bytes:
+        image = Image.new("RGB", (600, 160), "white")
+        ImageDraw.Draw(image).text(
+            (20, 35), "VPN CODE 691", fill="black", font=ImageFont.load_default(size=60)
+        )
+        output = io.BytesIO()
+        image.save(output, format="PNG")
+        return output.getvalue()
+
+    def test_tesseract_provider_uses_configured_command_and_english(self):
+        import pytesseract
+
+        provider = _default_ocr_provider(
+            test_settings(ocr_provider="tesseract", tesseract_cmd="/custom/tesseract")
+        )
+        with (
+            patch.object(pytesseract.pytesseract, "tesseract_cmd", "tesseract"),
+            patch.object(pytesseract, "get_tesseract_version") as get_version,
+            patch.object(pytesseract, "get_languages", return_value=["eng"]),
+            patch.object(pytesseract, "image_to_string", return_value="VPN CODE 691") as recognize,
+        ):
+            self.assertEqual(provider(self._sample_ocr_image()), "VPN CODE 691")
+            self.assertEqual(pytesseract.pytesseract.tesseract_cmd, "/custom/tesseract")
+            recognize.assert_called_once()
+            self.assertEqual(recognize.call_args.kwargs["lang"], "eng")
+            get_version.assert_called_once_with()
+
+    def test_missing_tesseract_has_actionable_configuration_error(self):
+        import pytesseract
+
+        provider = _default_ocr_provider(
+            test_settings(ocr_provider="tesseract", tesseract_cmd="/missing/tesseract")
+        )
+        with (
+            patch.object(pytesseract.pytesseract, "tesseract_cmd", "tesseract"),
+            patch.object(
+                pytesseract,
+                "get_tesseract_version",
+                side_effect=pytesseract.TesseractNotFoundError(),
+            ),
+            self.assertRaisesRegex(OCRConfigurationError, "Install tesseract-ocr"),
+        ):
+            provider(self._sample_ocr_image())
+
+    def test_missing_english_language_data_has_actionable_error(self):
+        import pytesseract
+
+        provider = _default_ocr_provider(
+            test_settings(ocr_provider="tesseract", tesseract_cmd="/custom/tesseract")
+        )
+        with (
+            patch.object(pytesseract.pytesseract, "tesseract_cmd", "tesseract"),
+            patch.object(pytesseract, "get_tesseract_version"),
+            patch.object(pytesseract, "get_languages", return_value=["osd"]),
+            self.assertRaisesRegex(OCRConfigurationError, "English language data"),
+        ):
+            provider(self._sample_ocr_image())
+
+    def test_installed_tesseract_recognizes_sample_image(self):
+        configured_command = get_settings().tesseract_cmd.strip()
+        if configured_command:
+            executable_available = Path(configured_command).is_file()
+        else:
+            executable_available = shutil.which("tesseract") is not None
+        if not executable_available:
+            self.skipTest("Tesseract is not installed/configured in this environment")
+
+        provider = _default_ocr_provider(
+            test_settings(ocr_provider="tesseract", tesseract_cmd=configured_command)
+        )
+        text = provider(self._sample_ocr_image()).upper()
+        self.assertIn("VPN", text)
+        self.assertIn("691", text)
+
     def test_vision_provider_reuses_and_overrides_openrouter_credentials(self):
         cases = [
             ({"vision_api_key": "", "openrouter_api_key": "router-key"}, "router-key"),

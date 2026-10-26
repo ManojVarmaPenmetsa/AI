@@ -55,6 +55,10 @@ class IngestionError(ValueError):
     """Raised when the input cannot be read as its declared document type."""
 
 
+class OCRConfigurationError(IngestionError):
+    """Raised when the configured Tesseract executable or language data is unavailable."""
+
+
 class VisionAnalysisFailure(ValueError):
     """Vision failure tagged with the phase that produced it."""
 
@@ -105,15 +109,53 @@ def _default_ocr_provider(settings) -> OCRProvider | None:
     if provider != "tesseract":
         raise IngestionError(f"Unsupported OCR_PROVIDER: {settings.ocr_provider}")
 
+    verified = False
+
+    def verify_tesseract(pytesseract) -> None:
+        nonlocal verified
+        if verified:
+            return
+
+        # Always apply the configured command (or PATH default) so a stale
+        # pytesseract global from another provider/test cannot win.
+        pytesseract.pytesseract.tesseract_cmd = (
+            settings.tesseract_cmd.strip() or "tesseract"
+        )
+        try:
+            pytesseract.get_tesseract_version()
+        except pytesseract.TesseractNotFoundError as exc:
+            raise OCRConfigurationError(
+                "Tesseract executable not found. Install tesseract-ocr and set "
+                "TESSERACT_CMD to a valid executable path (Linux: /usr/bin/tesseract)."
+            ) from exc
+
+        try:
+            languages = pytesseract.get_languages(config="")
+        except pytesseract.TesseractNotFoundError as exc:
+            raise OCRConfigurationError(
+                "Tesseract executable not found. Install tesseract-ocr and set "
+                "TESSERACT_CMD to a valid executable path (Linux: /usr/bin/tesseract)."
+            ) from exc
+        except pytesseract.TesseractError as exc:
+            raise OCRConfigurationError(
+                "Tesseract could not read its language data. Install "
+                "tesseract-ocr-eng and verify TESSDATA_PREFIX if it is customized."
+            ) from exc
+        if "eng" not in languages:
+            raise OCRConfigurationError(
+                "Tesseract English language data (eng) is missing. Install "
+                "tesseract-ocr-eng and verify TESSDATA_PREFIX if it is customized."
+            )
+        verified = True
+
     def ocr(image_bytes: bytes) -> str:
         import pytesseract
         from PIL import Image
 
-        if settings.tesseract_cmd:
-            pytesseract.pytesseract.tesseract_cmd = settings.tesseract_cmd
+        verify_tesseract(pytesseract)
         with Image.open(io.BytesIO(image_bytes)) as image:
             return pytesseract.image_to_string(
-                image, timeout=settings.ocr_timeout_seconds
+                image, lang="eng", timeout=settings.ocr_timeout_seconds
             )
 
     return ocr
@@ -208,6 +250,8 @@ def _normalize_openai_compatible_base_url(base_url: str) -> str:
 
 def _safe_provider_error(exc: Exception) -> str:
     """Describe provider failures without including request or response contents."""
+    if isinstance(exc, OCRConfigurationError):
+        return str(exc)
     status = getattr(getattr(exc, "response", None), "status_code", None)
     if status is None:
         status = getattr(exc, "status_code", None)
