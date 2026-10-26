@@ -10,6 +10,19 @@ let isSending = false;
 
 function escapeHtml(s=''){return s.replace(/[&<>'"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c]));}
 function formatText(s=''){return escapeHtml(s).replace(/\n/g,'<br>');}
+async function readApiResponse(res){
+  const contentType=(res.headers.get('content-type')||'').toLowerCase();
+  if(contentType.includes('application/json')){
+    try{return await res.json();}catch{}
+  }
+  return {detail:`Server returned a non-JSON response (HTTP ${res.status}). Check the API route and server logs.`};
+}
+function apiError(res,data,fallback='Request failed'){
+  let message=data.detail||fallback;
+  const requestId=res.headers.get('x-request-id');
+  if(requestId&&!String(message).includes(requestId)) message+=` (Request ID: ${requestId})`;
+  return new Error(message);
+}
 function addMessage(role, text, source='', citations=[]){
   const wrap=document.createElement('div'); wrap.className=`message ${role}`;
   const citeHtml=citations.length?`<div class="citations"><strong>Sources</strong><br>${citations.map(c=>`${c.url?`<a href="${escapeHtml(c.url)}" target="_blank" rel="noopener">${escapeHtml(c.title)}</a>`:escapeHtml(c.title)}${c.excerpt?`<blockquote>${escapeHtml(c.excerpt)}</blockquote>`:''}`).join('<br>')}</div>`:'';
@@ -19,8 +32,8 @@ function addMessage(role, text, source='', citations=[]){
 function renderTrace(items=[]){trace.innerHTML=items.length?items.map(x=>`<div class="trace-item">${escapeHtml(x)}</div>`).join(''):'<div class="empty">No trace.</div>';}
 function showWelcome(){chat.innerHTML='';addMessage('assistant','How can I help with IT support? Try an IT support question or ask about current vendor information.');}
 async function createConversation(){
-  const res=await fetch('/api/conversations',{method:'POST'}); const data=await res.json();
-  if(!res.ok) throw new Error(data.detail||'Could not start a conversation');
+  const res=await fetch('/api/conversations',{method:'POST'}); const data=await readApiResponse(res);
+  if(!res.ok) throw apiError(res,data,'Could not start a conversation');
   conversationId=data.conversation_id; localStorage.setItem(conversationStorageKey,conversationId);
   showWelcome(); renderTrace([]); sourceUsed.textContent='—';
 }
@@ -29,8 +42,9 @@ async function resumeConversation(){
   if(!saved){await createConversation();return;}
   const res=await fetch(`/api/conversations/${encodeURIComponent(saved)}`);
   if(res.status===404){localStorage.removeItem(conversationStorageKey);await createConversation();return;}
-  if(!res.ok) throw new Error('Could not resume the conversation');
-  const data=await res.json(); conversationId=data.conversation_id; chat.innerHTML='';
+  const data=await readApiResponse(res);
+  if(!res.ok) throw apiError(res,data,'Could not resume the conversation');
+  conversationId=data.conversation_id; chat.innerHTML='';
   if(!data.messages.length) showWelcome(); else data.messages.forEach(m=>addMessage(m.role,m.content));
 }
 async function askAgent(q){
@@ -43,7 +57,7 @@ async function askAgent(q){
     if(!conversationId) await createConversation();
     addMessage('user',q); question.value=''; question.style.height=''; renderTrace(['Looking through conversation context and trusted sources...']); sourceUsed.textContent='Working';
     const res=await fetch('/api/chat',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({question:q,conversation_id:conversationId})});
-    const data=await res.json(); if(!res.ok) throw new Error(data.detail||'Request failed');
+    const data=await readApiResponse(res); if(!res.ok) throw apiError(res,data);
     conversationId=data.conversation_id; localStorage.setItem(conversationStorageKey,conversationId);
     addMessage('assistant',data.answer,data.source_used,data.citations||[]); renderTrace(data.trace||[]); sourceUsed.textContent=data.source_used;
   }catch(e){addMessage('assistant',`Error: ${e.message}`); renderTrace(['Request failed']); sourceUsed.textContent='Error';}
