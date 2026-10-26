@@ -10,6 +10,7 @@ from pydantic import BaseModel, Field
 from starlette.concurrency import run_in_threadpool
 from app.core.config import get_settings
 from app.rag.workflow import ask
+from app.rag.openrouter_errors import classify_openrouter_failure, http_retry_after
 from app.rag.vectorstore import (
     delete_document_vectors,
 )
@@ -285,18 +286,47 @@ def chat(payload: ChatRequest, request: Request, response: Response):
     except HTTPException:
         raise
     except Exception as exc:
-        status_code = 400 if isinstance(exc, ValueError) else 500
+        failure = classify_openrouter_failure(exc)
+        if failure.status_code == 429:
+            status_code = 429
+            if failure.category == "openrouter_account_or_model_limit":
+                detail = "The configured OpenRouter account or model is rate-limited or out of quota. Please try again later."
+            elif failure.category == "upstream_provider_rate_limit":
+                detail = "The selected AI provider is temporarily rate-limited. Please wait and try again."
+            else:
+                detail = "The AI service is rate-limited. Please wait and try again."
+        elif failure.category == "transient_upstream_error":
+            status_code = 503
+            detail = "The AI service is temporarily unavailable. Please wait and try again."
+        else:
+            status_code = 400 if isinstance(exc, ValueError) else 500
+            detail = "The request could not be completed."
+
+        diagnostics = []
+        headers = {}
+        if status_code in {429, 503}:
+            diagnostics.append(f"openrouter:{failure.category}")
+            retry_after = http_retry_after(exc)
+            if retry_after:
+                headers["Retry-After"] = retry_after
+            logger.warning(
+                "Chat AI service unavailable request_id=%s category=%s provider=%s",
+                request_id,
+                failure.category,
+                failure.provider or "unknown",
+            )
         _write_query_audit_safely(
             payload.question, "failed", [], request_id=request_id,
             conversation_id=conversation_id, outcome="failed",
             latency_ms=(perf_counter() - started) * 1000,
-            error_category=type(exc).__name__, diagnostics=["workflow_execution_failed"],
+            error_category=type(exc).__name__,
+            diagnostics=diagnostics or ["workflow_execution_failed"],
         )
-        logger.warning("Chat request failed request_id=%s category=%s", request_id, type(exc).__name__)
-        detail = "The request could not be completed."
+        if status_code == 400 or status_code == 500:
+            logger.warning("Chat request failed request_id=%s category=%s", request_id, type(exc).__name__)
         if status_code == 500:
             detail += f" Reference request ID: {request_id}"
-        raise HTTPException(status_code=status_code, detail=detail) from exc
+        raise HTTPException(status_code=status_code, detail=detail, headers=headers) from exc
 
 
 

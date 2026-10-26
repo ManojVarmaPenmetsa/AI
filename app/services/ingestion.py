@@ -56,7 +56,15 @@ class IngestionError(ValueError):
 
 
 class OCRConfigurationError(IngestionError):
-    """Raised when the configured Tesseract executable or language data is unavailable."""
+    """Raised when OCR provider configuration is incomplete or invalid."""
+
+
+class OCRSpaceAPIError(IngestionError):
+    """Raised for safe, categorized OCR.space request and response failures."""
+
+    def __init__(self, message: str, status_code: int | None = None):
+        self.status_code = status_code
+        super().__init__(message)
 
 
 class VisionAnalysisFailure(ValueError):
@@ -106,59 +114,108 @@ def _default_ocr_provider(settings) -> OCRProvider | None:
     provider = settings.ocr_provider.strip().lower()
     if provider in {"", "none", "off", "disabled"}:
         return None
-    if provider != "tesseract":
+    if provider != "ocr_space":
         raise IngestionError(f"Unsupported OCR_PROVIDER: {settings.ocr_provider}")
 
-    verified = False
-
-    def verify_tesseract(pytesseract) -> None:
-        nonlocal verified
-        if verified:
-            return
-
-        # Always apply the configured command (or PATH default) so a stale
-        # pytesseract global from another provider/test cannot win.
-        pytesseract.pytesseract.tesseract_cmd = (
-            settings.tesseract_cmd.strip() or "tesseract"
+    api_key = settings.ocr_space_api_key.strip()
+    if not api_key:
+        raise OCRConfigurationError(
+            "OCR_SPACE_API_KEY must be configured when OCR_PROVIDER=ocr_space."
         )
-        try:
-            pytesseract.get_tesseract_version()
-        except pytesseract.TesseractNotFoundError as exc:
-            raise OCRConfigurationError(
-                "Tesseract executable not found. Install tesseract-ocr and set "
-                "TESSERACT_CMD to a valid executable path (Linux: /usr/bin/tesseract)."
-            ) from exc
-
-        try:
-            languages = pytesseract.get_languages(config="")
-        except pytesseract.TesseractNotFoundError as exc:
-            raise OCRConfigurationError(
-                "Tesseract executable not found. Install tesseract-ocr and set "
-                "TESSERACT_CMD to a valid executable path (Linux: /usr/bin/tesseract)."
-            ) from exc
-        except pytesseract.TesseractError as exc:
-            raise OCRConfigurationError(
-                "Tesseract could not read its language data. Install "
-                "tesseract-ocr-eng and verify TESSDATA_PREFIX if it is customized."
-            ) from exc
-        if "eng" not in languages:
-            raise OCRConfigurationError(
-                "Tesseract English language data (eng) is missing. Install "
-                "tesseract-ocr-eng and verify TESSDATA_PREFIX if it is customized."
-            )
-        verified = True
+    api_url = settings.ocr_space_api_url.strip()
+    if not api_url.startswith("https://"):
+        raise OCRConfigurationError("OCR_SPACE_API_URL must use HTTPS.")
+    max_file_bytes = int(settings.ocr_space_max_file_bytes)
+    if max_file_bytes <= 0:
+        raise OCRConfigurationError("OCR_SPACE_MAX_FILE_BYTES must be positive.")
 
     def ocr(image_bytes: bytes) -> str:
-        import pytesseract
-        from PIL import Image
+        import httpx
 
-        verify_tesseract(pytesseract)
-        with Image.open(io.BytesIO(image_bytes)) as image:
-            return pytesseract.image_to_string(
-                image, lang="eng", timeout=settings.ocr_timeout_seconds
+        prepared = _prepare_ocr_space_image(image_bytes, max_file_bytes)
+        try:
+            response = httpx.post(
+                api_url,
+                headers={"apikey": api_key},
+                data={"OCREngine": str(settings.ocr_space_engine), "language": "eng"},
+                files={"file": ("page.jpg", prepared, "image/jpeg")},
+                timeout=settings.ocr_timeout_seconds,
             )
+        except httpx.TimeoutException as exc:
+            raise OCRSpaceAPIError("OCR.space request timed out") from exc
+        except httpx.RequestError as exc:
+            raise OCRSpaceAPIError("OCR.space request failed") from exc
+
+        status = response.status_code
+        if status == 401 or status == 403:
+            raise OCRSpaceAPIError("OCR.space rejected the API key", status)
+        if status == 429:
+            raise OCRSpaceAPIError("OCR.space rate limit exceeded", status)
+        if status >= 500:
+            raise OCRSpaceAPIError("OCR.space service is temporarily unavailable", status)
+        if status >= 400:
+            raise OCRSpaceAPIError("OCR.space rejected the request", status)
+        try:
+            payload = response.json()
+        except (ValueError, TypeError) as exc:
+            raise OCRSpaceAPIError("OCR.space returned malformed JSON", status) from exc
+        if not isinstance(payload, dict):
+            raise OCRSpaceAPIError("OCR.space returned a malformed response", status)
+        error_value = payload.get("ErrorMessage", payload.get("ErrorDetails", ""))
+        if isinstance(error_value, list):
+            error_text = " ".join(str(item) for item in error_value).casefold()
+        else:
+            error_text = str(error_value).casefold()
+        if any(token in error_text for token in ("invalid api key", "incorrect api key", "api key is not valid", "apikey is invalid")):
+            raise OCRSpaceAPIError("OCR.space rejected the API key", status)
+        if any(token in error_text for token in ("rate limit", "request limit", "quota exceeded", "too many requests")):
+            raise OCRSpaceAPIError("OCR.space rate limit exceeded", status)
+        exit_code = payload.get("OCRExitCode")
+        if payload.get("IsErroredOnProcessing") is True or (
+            isinstance(exit_code, int) and exit_code not in {1, 2}
+        ):
+            suffix = f" (exit code {exit_code})" if isinstance(exit_code, int) else ""
+            raise OCRSpaceAPIError(f"OCR.space could not process the image{suffix}", status)
+        results = payload.get("ParsedResults")
+        if not isinstance(results, list):
+            raise OCRSpaceAPIError("OCR.space response is missing parsed results", status)
+        extracted: list[str] = []
+        for result in results:
+            if not isinstance(result, dict) or not isinstance(result.get("ParsedText", ""), str):
+                raise OCRSpaceAPIError("OCR.space returned malformed parsed text", status)
+            text = result.get("ParsedText", "").strip()
+            if text:
+                extracted.append(text)
+        return "\n\n".join(extracted)
 
     return ocr
+
+
+def _prepare_ocr_space_image(image_bytes: bytes, max_file_bytes: int) -> bytes:
+    """Encode one image as a size-bounded JPEG for the free API tier."""
+    from PIL import Image
+
+    try:
+        with Image.open(io.BytesIO(image_bytes)) as source:
+            image = source.convert("RGB")
+    except Exception as exc:
+        raise OCRSpaceAPIError("OCR input is not a supported image") from exc
+
+    for _ in range(12):
+        for quality in (88, 78, 68, 58):
+            output = io.BytesIO()
+            image.save(output, format="JPEG", quality=quality, optimize=True)
+            prepared = output.getvalue()
+            if len(prepared) <= max_file_bytes:
+                return prepared
+        width = max(1, int(image.width * 0.85))
+        height = max(1, int(image.height * 0.85))
+        if (width, height) == image.size:
+            break
+        image = image.resize((width, height), Image.Resampling.LANCZOS)
+    raise OCRSpaceAPIError(
+        f"OCR input exceeds the configured {max_file_bytes}-byte OCR.space file limit"
+    )
 
 
 def _default_vision_provider(settings) -> VisionProvider | None:
@@ -192,10 +249,10 @@ def _default_vision_provider(settings) -> VisionProvider | None:
                     "type": "text",
                     "text": (
                         "Describe only information visibly present on this document page. "
-                        "Transcribe important screenshot messages and visible steps. For "
-                        "diagrams or charts, name visible components and explain the "
-                        "relationships shown by arrows or labels. Do not infer missing "
-                        "details. Preserve warnings, error codes, and table values. "
+                        "Focus on layout, visual relationships, and what arrows or chart "
+                        "structure show. Avoid repeating text that OCR can extract; mention "
+                        "a short label only when needed to explain a relationship. Do not "
+                        "infer missing details. Preserve critical visual warnings or states. "
                         f"Source: {source_filename}, page {page_number}."
                     ),
                 },
@@ -252,6 +309,10 @@ def _safe_provider_error(exc: Exception) -> str:
     """Describe provider failures without including request or response contents."""
     if isinstance(exc, OCRConfigurationError):
         return str(exc)
+    if isinstance(exc, OCRSpaceAPIError):
+        if exc.status_code is not None:
+            return f"OCRSpaceAPIError (HTTP {exc.status_code}): {exc}"
+        return f"OCRSpaceAPIError: {exc}"
     status = getattr(getattr(exc, "response", None), "status_code", None)
     if status is None:
         status = getattr(exc, "status_code", None)
@@ -515,7 +576,7 @@ def _pdf_documents(
                                 metadata={
                                     **page_meta,
                                     "content_type": "ocr",
-                                    "provenance": "tesseract_full_page_ocr",
+                                    "provenance": "ocr_space_full_page_ocr",
                                 },
                             )
                         )

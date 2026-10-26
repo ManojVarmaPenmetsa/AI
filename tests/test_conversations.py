@@ -34,7 +34,71 @@ class FakeLLM:
         return AIMessage(content="A stable mocked answer")
 
 
+class FakeServiceError(Exception):
+    def __init__(self, status_code, body, headers=None):
+        super().__init__("api-key=must-not-be-exposed prompt=private")
+        self.status_code = status_code
+        self.response = SimpleNamespace(
+            status_code=status_code,
+            headers=headers or {},
+            json=lambda: body,
+        )
+
+
 class ConversationPersistenceTests(unittest.TestCase):
+    def test_chat_translates_rate_limit_to_safe_retryable_http_error(self):
+        cases = (
+            (
+                {"error": {"message": "free-models-per-day quota exceeded"}},
+                "openrouter_account_or_model_limit",
+                "OpenRouter account or model",
+            ),
+            (
+                {"error": {"message": "Provider returned error", "metadata": {"provider_name": "Provider A"}}},
+                "upstream_provider_rate_limit",
+                "AI provider",
+            ),
+        )
+        for body, _category, expected_message in cases:
+            with self.subTest(expected_message=expected_message), tempfile.TemporaryDirectory() as temp_dir:
+                settings = get_settings().model_copy(update={
+                    "conversation_db_path": str(Path(temp_dir) / "conversations.db"),
+                    "audit_db_path": str(Path(temp_dir) / "audit.db"),
+                })
+                failure = FakeServiceError(429, body, {"Retry-After": "12"})
+                with (
+                    patch.object(app_main, "get_settings", return_value=settings),
+                    patch.object(app_main, "init_db"),
+                    patch("app.api.routes.ask", side_effect=failure),
+                    patch("app.api.routes.write_audit"),
+                ):
+                    with TestClient(app_main.create_app()) as client:
+                        response = client.post("/api/chat", json={"question": "Test question"})
+                self.assertEqual(response.status_code, 429)
+                self.assertIn(expected_message, response.json()["detail"])
+                self.assertEqual(response.headers["retry-after"], "12")
+                self.assertNotIn("api-key", response.text)
+                self.assertNotIn("private", response.text)
+
+    def test_chat_maps_upstream_server_error_to_service_unavailable(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            settings = get_settings().model_copy(update={
+                "conversation_db_path": str(Path(temp_dir) / "conversations.db"),
+                "audit_db_path": str(Path(temp_dir) / "audit.db"),
+            })
+            failure = FakeServiceError(502, {"error": {"message": "sensitive provider detail"}})
+            with (
+                patch.object(app_main, "get_settings", return_value=settings),
+                patch.object(app_main, "init_db"),
+                patch("app.api.routes.ask", side_effect=failure),
+                patch("app.api.routes.write_audit"),
+            ):
+                with TestClient(app_main.create_app()) as client:
+                    response = client.post("/api/chat", json={"question": "Test question"})
+            self.assertEqual(response.status_code, 503)
+            self.assertIn("temporarily unavailable", response.json()["detail"])
+            self.assertNotIn("sensitive provider detail", response.text)
+
     def test_conversation_resume_context_and_owner_isolation(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             database_path = str(Path(temp_dir) / "conversations.db")

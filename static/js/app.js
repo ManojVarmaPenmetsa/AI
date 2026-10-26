@@ -60,7 +60,12 @@ async function askAgent(q){
     const data=await readApiResponse(res); if(!res.ok) throw apiError(res,data);
     conversationId=data.conversation_id; localStorage.setItem(conversationStorageKey,conversationId);
     addMessage('assistant',data.answer,data.source_used,data.citations||[]); renderTrace(data.trace||[]); sourceUsed.textContent=data.source_used;
-  }catch(e){addMessage('assistant',`Error: ${e.message}`); renderTrace(['Request failed']); sourceUsed.textContent='Error';}
+  }catch(e){
+    question.value=q;
+    question.style.height='';
+    addMessage('assistant',`${e.message} Your question is still in the box; you can submit it again when the service is available.`);
+    renderTrace(['Request failed']); sourceUsed.textContent='Error';
+  }
   finally{btn.disabled=false; btn.innerHTML=oldButtonText; form.removeAttribute('aria-busy'); document.querySelectorAll('.example').forEach(button=>button.disabled=false); isSending=false; question.focus();}
 }
 form.addEventListener('submit',e=>{e.preventDefault(); const q=question.value.trim(); if(q) askAgent(q);});

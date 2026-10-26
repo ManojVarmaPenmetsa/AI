@@ -76,8 +76,8 @@ Hugging Face embeddings run locally after the model is downloaded; this avoids a
 
 - **Prefer internal evidence.** The graph searches the private knowledge base first and grades the retrieved evidence. It uses Tavily only when private evidence is insufficient, then retries with one rewritten query before abstaining. This keeps answers tied to company material when available and bounds fallback cost and latency.
 - **Keep embedding generation local.** The Hugging Face embedding model avoids sending document text to a separate embedding API. The chat and optional visual analysis use OpenRouter, web fallback uses Tavily, and vectors are stored in Pinecone; review those data flows for your organization's requirements.
-- **Treat OCR and visual analysis as separate jobs.** PDF text and tables are extracted directly first. Tesseract handles rendered pages with little selectable text; a vision model is reserved for pages that appear to contain meaningful diagrams, screenshots, or other visual information. This avoids sending every page as an image and allows usable text/OCR content to be indexed even when vision is unavailable.
-- **Use local Tesseract for OCR.** Tesseract runs in the app container, has no per-page provider fee, and avoids sending scanned page images to an OCR vendor. It is a traditional OCR engine, so handwriting, poor scans, complex layouts, and non-English documents may need additional language data or another OCR provider. It returns recognized text, not a visual understanding of diagrams; the optional vision path handles that separately. Docker installs the English Tesseract binary.
+- **Treat OCR and visual analysis as separate jobs.** PDF text and tables are extracted directly first. OCR.space handles rendered pages with little selectable text and embedded image text; the vision model is reserved for selected diagrams, screenshots, charts, and other visual information. This avoids sending every page as an image and allows selectable text/OCR to remain indexed when vision is unavailable.
+- **Use OCR.space for scanned text.** The OCR.space free API receives selected page images over HTTPS and extracts visible text. The application sends one page or embedded image per request and bounds the file size to the configured free-tier limit. OCR is subject to the provider's quotas and availability; it does not interpret diagrams. The optional Gemma/OpenRouter vision path handles visual structure separately.
 - **Activate document replacements only after verification.** Each upload is parsed and chunked as a new generation, upserted to Pinecone, and fetched back before the registry switches the active generation. If parsing or verification fails, the previous active generation remains available. Cleanup is scoped to that document.
 - **Keep audit data useful while limiting content retention.** New chat audit rows retain outcome, source references, timings, and question length, not the question text. Ingestion audit rows retain status and safe diagnostics, not document contents or model responses.
 - **Use SQLite for a simple single-host deployment.** SQLite keeps local development and single-host state operationally simple. It does not provide shared state or cross-host locking; use managed shared storage before scaling to multiple instances. See the [DigitalOcean App Platform production notes](#digitalocean-app-platform-production-notes).
@@ -158,7 +158,7 @@ The Dockerfile is configured for a containerized web service. It listens on the 
 
 The container's local filesystem is temporary on App Platform. Files written there can be lost when an instance is replaced, and each instance has its own filesystem. App Platform does not support persistent volumes. This app currently writes conversations, audit records, the document registry, and uploaded source files to local SQLite databases and the local `uploads/` directory. Do not treat those local paths as durable production storage on App Platform. Before accepting persistent conversations or document uploads, migrate these stores to durable services (for example, a managed database for SQLite-backed state and Spaces for uploaded files) and configure backups. The app's current SQLite document registry and local upload workflow are not multi-instance safe.
 
-Configure production values as App Platform runtime environment variables; do not commit a `.env` file or bake secrets into the image. At minimum, set `APP_ENV=production`, `OPENROUTER_API_KEY`, `PINECONE_API_KEY`, `TAVILY_API_KEY` when using web fallback, and a strong `ADMIN_API_KEY` when enabling document upload or admin audit endpoints. `APP_ENV=production` makes the conversation-owner cookie use the `Secure` flag. Set `PINECONE_INDEX_NAME`, `PINECONE_NAMESPACE`, and the embedding model/dimension to the intended production corpus. The app can create the configured Pinecone index if it is missing, so verify the target credentials and index settings before startup.
+Configure production values as App Platform runtime environment variables; do not commit a `.env` file or bake secrets into the image. At minimum, set `APP_ENV=production`, `OPENROUTER_API_KEY`, `PINECONE_API_KEY`, `OCR_SPACE_API_KEY`, `TAVILY_API_KEY` when using web fallback, and a strong `ADMIN_API_KEY` when enabling document upload or admin audit endpoints. `APP_ENV=production` makes the conversation-owner cookie use the `Secure` flag. Set `PINECONE_INDEX_NAME`, `PINECONE_NAMESPACE`, and the embedding model/dimension to the intended production corpus. The app can create the configured Pinecone index if it is missing, so verify the target credentials and index settings before startup.
 
 App Platform can check `GET /api/health` on port `8080` (or the configured HTTP port). This endpoint currently confirms only that the web process responds; it does not verify database or provider connectivity. The Docker image downloads the Hugging Face embedding model on first use, which can add startup time and runtime disk/memory usage. Review deployment logs and memory/disk metrics before increasing traffic or enabling multiple instances.
 
@@ -190,11 +190,11 @@ The response includes `answer`, `source_used`, `trace`, `citations`, `rewritten_
 
 Use **Add company document** in the UI, enter the configured admin key, and choose a PDF, TXT, Markdown, or DOCX file. The `/api/ingest` endpoint also accepts the `X-Admin-Key` header. Upload access is disabled if `ADMIN_API_KEY` is not configured.
 
-PDF ingestion first extracts selectable page text and detected tables. Pages with little selectable text are rendered and sent to the configured OCR provider. Relevant pages with large embedded images or many vector drawings are rendered as complete pages for visual analysis, subject to `PDF_VISION_MAX_PAGES`. The example configuration selects `nvidia/nemotron-3.5-super-vl:free`, an image-input model listed by OpenRouter. The vision client reuses `OPENROUTER_API_KEY` and `OPENROUTER_BASE_URL` unless `VISION_API_KEY` or `VISION_BASE_URL` overrides them. Keep the base URL as an API root (for OpenRouter, `https://openrouter.ai/api/v1`); the OpenAI-compatible client adds `/chat/completions` once, and a configured URL that already ends in that path is normalized first. The ordinary text model is unchanged and is never assumed to accept images. When there are visual pages but vision is unavailable, the upload response reports `vision_status` as `not_configured` or `partial`; successfully described pages report `completed`. Text and OCR continue to be indexed where possible. Provider errors, empty responses, and page-limit skips appear as warnings.
+PDF ingestion first extracts selectable page text and detected tables. Pages with little selectable text are rendered and sent to the configured OCR provider. Relevant pages with large embedded images or many vector drawings are rendered as complete pages for visual analysis, subject to `PDF_VISION_MAX_PAGES`. The example configuration uses `VISION_MODEL=nvidia/nemotron-3.5-super-vl:free` for visual analysis. The vision client reuses `OPENROUTER_API_KEY` and `OPENROUTER_BASE_URL` unless `VISION_API_KEY` or `VISION_BASE_URL` overrides them. Keep the base URL as an API root (for OpenRouter, `https://openrouter.ai/api/v1`); the OpenAI-compatible client adds `/chat/completions` once, and a configured URL that already ends in that path is normalized first. The main chat model remains controlled separately by `OPENROUTER_MODEL`. When there are visual pages but vision is unavailable, the upload response reports `vision_status` as `not_configured` or `partial`; successfully described pages report `completed`. Text and OCR continue to be indexed where possible. Provider errors, empty responses, and page-limit skips appear as warnings.
 
-OCR defaults to local Tesseract (`OCR_PROVIDER=tesseract`). It processes rendered pages that have little selectable text; it does not run on every page. This avoids a paid OCR API and keeps scanned page images inside the app's processing environment. Tesseract is designed to recognize printed text, not interpret diagrams, and results depend on image quality and available language data. On Windows, install a current build using `winget install --id UB-Mannheim.TesseractOCR -e` or the installer linked from [Tesseract's download guidance](https://tesseract-ocr.github.io/tessdoc/Downloads.html), then open a new terminal and verify it with `tesseract --version`. Set `TESSERACT_CMD` to the full `tesseract.exe` path if the executable is not on `PATH`; the Docker image installs the English Tesseract binary. Set `OCR_PROVIDER=none` to disable OCR. `VISION_TIMEOUT_SECONDS`, `OCR_TIMEOUT_SECONDS`, render DPI, page text threshold, visual thresholds, maximum rendered pixel count (`PDF_VISION_MAX_PIXELS`), maximum image payload bytes (`PDF_VISION_MAX_IMAGE_BYTES`), and maximum number of vision pages are configurable. Oversized pages/images are skipped with an upload warning while other extracted content continues through indexing.
+OCR defaults to OCR.space (`OCR_PROVIDER=ocr_space`). It processes rendered pages with little selectable text and embedded images on text-bearing pages; it does not run on every page. Configure `OCR_SPACE_API_KEY`, `OCR_SPACE_API_URL` (default `https://api.ocr.space/parse/image`), and `OCR_SPACE_ENGINE` (default `2`). OCR.space receives page images using its HTTPS multipart API; each PDF page is submitted individually and images are resized/re-encoded to fit the free-tier 1 MB file limit. Inputs that cannot be reduced below `OCR_SPACE_MAX_FILE_BYTES` fail that page with a warning. OCR.space free-tier limits include 25,000 requests/month, 500 requests/day per IP, a 1 MB file size limit, and a 3-page PDF limit; page-by-page processing keeps each request within that PDF page cap, but ingestion can still hit the API quota. OCR.space extracts text and does not interpret diagrams; visual descriptions remain a separate, selective Gemma/OpenRouter step. Set `OCR_PROVIDER=none` to disable OCR. `OCR_TIMEOUT_SECONDS`, render DPI, page text threshold, visual thresholds, maximum rendered pixel count (`PDF_VISION_MAX_PIXELS`), maximum image payload bytes (`PDF_VISION_MAX_IMAGE_BYTES`), and maximum number of vision pages are configurable. Oversized pages/images and provider failures are reported as upload warnings while other extracted content continues through indexing.
 
-To try PDF ingestion locally, set `OPENROUTER_API_KEY` and `ADMIN_API_KEY` in the active env file (`.conda_env/.env` takes precedence over the root `.env`), install/verify Tesseract for scanned pages, start the app, and upload a small PDF from **Add company document**. Check the returned page, OCR, and vision status fields and then ask a question grounded in its visual content to verify retrieval. Run the mocked, no-paid-API unit suite with `python -m unittest discover -s tests -v` (or `.\.conda_env\python.exe -m unittest discover -s tests -v`). OpenRouter free-model limits vary by account and may change; check the current key's allowance through OpenRouter's key API or dashboard. A free route may be rate-limited or temporarily unavailable; such pages are marked partial and their ordinary text/OCR remain indexed. Select another model that explicitly lists image input in the [OpenRouter model browser](https://openrouter.ai/models?input_modalities=image) by changing `VISION_MODEL`; do not change `OPENROUTER_MODEL` unless you intend to change chat behavior.
+To try PDF ingestion locally, set `OCR_SPACE_API_KEY`, `OPENROUTER_API_KEY`, and `ADMIN_API_KEY` in the active env file (`.conda_env/.env` takes precedence over the root `.env`), start the app, and upload a small PDF from **Add company document**. Check the returned page, OCR, and vision status fields and then ask a question grounded in its visual content to verify retrieval. Run the mocked, no-paid-API unit suite with `python -m unittest discover -s tests -v` (or `.\.conda_env\python.exe -m unittest discover -s tests -v`). OpenRouter free-model limits vary by account and may change; check the current key's allowance through OpenRouter's key API or dashboard. A free route may be rate-limited or temporarily unavailable; such pages are marked partial and their ordinary text/OCR remain indexed. Select another model that explicitly lists image input in the [OpenRouter model browser](https://openrouter.ai/models?input_modalities=image) by changing `VISION_MODEL`; do not change `OPENROUTER_MODEL` unless you intend to change chat behavior.
 
 Ingestion audit records store document identifiers, version, status, vision status, and safe warning diagnostics. They do not store document text, image payloads, API keys, or model responses.
 
@@ -264,18 +264,19 @@ uses the Dockerfile. The container serves HTTP on port `8080` and binds to
 `0.0.0.0`; configure the app's HTTP port as `8080`. The health endpoint is
 `/api/health`.
 
-The image installs `tesseract-ocr` and `tesseract-ocr-eng`, verifies the Linux
-binary and English language data during build, and defaults
-`TESSERACT_CMD=/usr/bin/tesseract`. Keep `OCR_PROVIDER=tesseract`. Leave
-`TESSERACT_CMD` unset in App Platform or set it to `/usr/bin/tesseract`; do not
-copy a Windows path from your local `.env`. The application reports an
-actionable OCR configuration error if the binary or English data is missing.
-OCR remains selective according to the existing PDF page and image heuristics.
+The image does not install Tesseract. OCR uses OCR.space over HTTPS, so set
+`OCR_PROVIDER=ocr_space`, `OCR_SPACE_API_KEY`, `OCR_SPACE_API_URL`, and
+`OCR_SPACE_ENGINE`. The default API URL is `https://api.ocr.space/parse/image`
+and the default engine is `2`. Keep the API key in an encrypted App Platform
+environment variable. Scanned pages and embedded images are sent individually;
+large images are re-encoded within the free-tier 1 MB file limit. OCR remains
+selective according to the existing PDF page and image heuristics.
 
 Configure these runtime variables in App Platform (use encrypted/secret values
 for credentials):
 
 - Required credentials: `OPENROUTER_API_KEY`, `PINECONE_API_KEY`,
+  `OCR_SPACE_API_KEY`,
   `ADMIN_API_KEY`.
 - `TAVILY_API_KEY` is required when web search/fallback is enabled; set it for
   the current application configuration.
@@ -284,9 +285,12 @@ for credentials):
 - Preserve the existing model/provider configuration: `OPENROUTER_BASE_URL`,
   `OPENROUTER_MODEL`, `VISION_PROVIDER`, `VISION_MODEL`, and any explicit
   `VISION_API_KEY`/`VISION_BASE_URL` overrides. `VISION_API_KEY` may use the
-  OpenRouter key when no override is supplied.
-- Optional OCR and ingestion tuning variables include `OCR_PROVIDER`,
-  `TESSERACT_CMD`, `OCR_TIMEOUT_SECONDS`, `PDF_VISION_MAX_PAGES`,
+  OpenRouter key when no override is supplied. Set `OPENROUTER_MODEL` to
+  `nvidia/nemotron-3.5-lightning:free` for chat and `VISION_MODEL` to
+  `nvidia/nemotron-3.5-super-vl:free` for visual PDF descriptions.
+- OCR variables are `OCR_PROVIDER`, `OCR_SPACE_API_KEY`, `OCR_SPACE_API_URL`,
+  `OCR_SPACE_ENGINE`, `OCR_SPACE_MAX_FILE_BYTES`, and `OCR_TIMEOUT_SECONDS`.
+  Optional ingestion tuning variables include `PDF_VISION_MAX_PAGES`,
   `PDF_VISION_MIN_IMAGE_AREA_RATIO`, `PDF_VISION_MIN_DRAWINGS`,
   `PDF_RENDER_DPI`, `PDF_VISION_MAX_PIXELS`, `PDF_VISION_MAX_IMAGE_BYTES`,
   and `PDF_MIN_TEXT_WORDS`. Omit these to use application defaults.
@@ -303,10 +307,9 @@ directory is repository content. DigitalOcean documents the storage options at
 [App Platform persistent data](https://docs.digitalocean.com/products/app-platform/how-to/store-data/).
 This deployment setup does not migrate the local databases or uploads.
 
-Local Docker smoke run (the explicit Linux path overrides any Windows value
-read from your local env file):
+Local Docker smoke run:
 
 ```powershell
 docker build -t agentic-rag .
-docker run --rm -p 8080:8080 --env-file .conda_env/.env -e TESSERACT_CMD=/usr/bin/tesseract agentic-rag
+docker run --rm -p 8080:8080 --env-file .conda_env/.env agentic-rag
 ```

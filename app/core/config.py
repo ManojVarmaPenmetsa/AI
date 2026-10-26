@@ -15,7 +15,7 @@ class Settings(BaseSettings):
     openrouter_base_url: str = "https://openrouter.ai/api/v1"
     openrouter_model: str = "nvidia/nemotron-3.5-lightning:free"
     vision_provider: str = "openai_compatible"
-    vision_model: str = ""
+    vision_model: str = "nvidia/nemotron-3.5-super-vl:free"
     vision_api_key: str = ""
     vision_base_url: str = ""
     vision_timeout_seconds: int = 30
@@ -26,8 +26,11 @@ class Settings(BaseSettings):
     pdf_vision_max_pixels: int = 20_000_000
     pdf_vision_max_image_bytes: int = 12_582_912
     pdf_min_text_words: int = 25
-    ocr_provider: str = "tesseract"
-    tesseract_cmd: str = ""
+    ocr_provider: str = "ocr_space"
+    ocr_space_api_key: str = ""
+    ocr_space_api_url: str = "https://api.ocr.space/parse/image"
+    ocr_space_engine: str = "2"
+    ocr_space_max_file_bytes: int = 1_000_000
     ocr_timeout_seconds: int = 20
     tavily_api_key: str = ""
     pinecone_api_key: str = ""

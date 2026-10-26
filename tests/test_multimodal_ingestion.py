@@ -4,7 +4,6 @@ import tempfile
 import unittest
 import base64
 import io
-import shutil
 import sqlite3
 from pathlib import Path
 from types import SimpleNamespace
@@ -13,10 +12,10 @@ from unittest.mock import patch
 import pymupdf as fitz
 from PIL import Image, ImageDraw, ImageFont
 
-from app.core.config import get_settings
 from app.services.ingestion import (
     IngestionError,
     OCRConfigurationError,
+    OCRSpaceAPIError,
     _default_vision_provider,
     _default_ocr_provider,
     _normalize_openai_compatible_base_url,
@@ -24,6 +23,7 @@ from app.services.ingestion import (
     chunk_documents,
     ingest_file,
 )
+from app.core.config import Settings
 from app.rag import vectorstore, workflow
 from app.services import audit
 from langchain_core.documents import Document
@@ -32,7 +32,10 @@ from langchain_core.documents import Document
 def test_settings(**overrides):
     values = {
         "ocr_provider": "none",
-        "tesseract_cmd": "",
+        "ocr_space_api_key": "test-ocr-key",
+        "ocr_space_api_url": "https://api.ocr.space/parse/image",
+        "ocr_space_engine": "2",
+        "ocr_space_max_file_bytes": 1_000_000,
         "ocr_timeout_seconds": 5,
         "vision_provider": "openai_compatible",
         "vision_model": "",
@@ -54,6 +57,15 @@ def test_settings(**overrides):
 
 
 class MultimodalIngestionTests(unittest.TestCase):
+    def test_chat_and_vision_model_defaults_are_independent(self):
+        settings = Settings(_env_file=None)
+        self.assertEqual(
+            settings.openrouter_model, "nvidia/nemotron-3.5-lightning:free"
+        )
+        self.assertEqual(
+            settings.vision_model, "nvidia/nemotron-3.5-super-vl:free"
+        )
+
     @staticmethod
     def _sample_ocr_image() -> bytes:
         image = Image.new("RGB", (600, 160), "white")
@@ -64,70 +76,83 @@ class MultimodalIngestionTests(unittest.TestCase):
         image.save(output, format="PNG")
         return output.getvalue()
 
-    def test_tesseract_provider_uses_configured_command_and_english(self):
-        import pytesseract
-
-        provider = _default_ocr_provider(
-            test_settings(ocr_provider="tesseract", tesseract_cmd="/custom/tesseract")
+    def test_ocr_space_provider_posts_multipart_and_parses_text(self):
+        response = SimpleNamespace(
+            status_code=200,
+            json=lambda: {
+                "IsErroredOnProcessing": False,
+                "ParsedResults": [{"ParsedText": "VPN CODE 691"}],
+            },
         )
-        with (
-            patch.object(pytesseract.pytesseract, "tesseract_cmd", "tesseract"),
-            patch.object(pytesseract, "get_tesseract_version") as get_version,
-            patch.object(pytesseract, "get_languages", return_value=["eng"]),
-            patch.object(pytesseract, "image_to_string", return_value="VPN CODE 691") as recognize,
-        ):
+        with patch("httpx.post", return_value=response) as post:
+            provider = _default_ocr_provider(test_settings(ocr_provider="ocr_space"))
             self.assertEqual(provider(self._sample_ocr_image()), "VPN CODE 691")
-            self.assertEqual(pytesseract.pytesseract.tesseract_cmd, "/custom/tesseract")
-            recognize.assert_called_once()
-            self.assertEqual(recognize.call_args.kwargs["lang"], "eng")
-            get_version.assert_called_once_with()
+        args, kwargs = post.call_args
+        self.assertEqual(args[0], "https://api.ocr.space/parse/image")
+        self.assertEqual(kwargs["headers"], {"apikey": "test-ocr-key"})
+        self.assertEqual(kwargs["data"]["OCREngine"], "2")
+        self.assertEqual(kwargs["files"]["file"][0], "page.jpg")
+        self.assertTrue(kwargs["files"]["file"][2].startswith("image/"))
+        self.assertLessEqual(len(kwargs["files"]["file"][1]), 1_000_000)
 
-    def test_missing_tesseract_has_actionable_configuration_error(self):
-        import pytesseract
+    def test_ocr_space_empty_text_is_reported_as_empty(self):
+        response = SimpleNamespace(status_code=200, json=lambda: {"ParsedResults": [{"ParsedText": ""}]})
+        with patch("httpx.post", return_value=response):
+            provider = _default_ocr_provider(test_settings(ocr_provider="ocr_space"))
+            self.assertEqual(provider(self._sample_ocr_image()), "")
 
-        provider = _default_ocr_provider(
-            test_settings(ocr_provider="tesseract", tesseract_cmd="/missing/tesseract")
+    def test_ocr_space_invalid_key_and_rate_limit_are_safe_errors(self):
+        for status, message in [(403, "API key"), (429, "rate limit")]:
+            response = SimpleNamespace(status_code=status, json=lambda: {})
+            with patch("httpx.post", return_value=response):
+                provider = _default_ocr_provider(test_settings(ocr_provider="ocr_space"))
+                with self.assertRaisesRegex(OCRSpaceAPIError, message):
+                    provider(self._sample_ocr_image())
+        body_error = SimpleNamespace(
+            status_code=200,
+            json=lambda: {
+                "IsErroredOnProcessing": True,
+                "ErrorMessage": ["Invalid API key: do-not-log-this"],
+                "ParsedResults": [],
+            },
         )
-        with (
-            patch.object(pytesseract.pytesseract, "tesseract_cmd", "tesseract"),
-            patch.object(
-                pytesseract,
-                "get_tesseract_version",
-                side_effect=pytesseract.TesseractNotFoundError(),
-            ),
-            self.assertRaisesRegex(OCRConfigurationError, "Install tesseract-ocr"),
-        ):
-            provider(self._sample_ocr_image())
+        with patch("httpx.post", return_value=body_error):
+            provider = _default_ocr_provider(test_settings(ocr_provider="ocr_space"))
+            with self.assertRaisesRegex(OCRSpaceAPIError, "API key") as caught:
+                provider(self._sample_ocr_image())
+            self.assertNotIn("do-not-log-this", str(caught.exception))
 
-    def test_missing_english_language_data_has_actionable_error(self):
-        import pytesseract
+    def test_ocr_space_timeout_and_malformed_responses_fail_clearly(self):
+        import httpx
 
-        provider = _default_ocr_provider(
-            test_settings(ocr_provider="tesseract", tesseract_cmd="/custom/tesseract")
+        provider = _default_ocr_provider(test_settings(ocr_provider="ocr_space"))
+        with patch("httpx.post", side_effect=httpx.TimeoutException("private prompt")):
+            with self.assertRaisesRegex(OCRSpaceAPIError, "timed out") as caught:
+                provider(self._sample_ocr_image())
+            self.assertNotIn("private prompt", str(caught.exception))
+        malformed = SimpleNamespace(status_code=200, json=lambda: {"ParsedResults": "bad"})
+        with patch("httpx.post", return_value=malformed):
+            with self.assertRaisesRegex(OCRSpaceAPIError, "parsed results"):
+                provider(self._sample_ocr_image())
+        invalid_json = SimpleNamespace(
+            status_code=200,
+            json=lambda: (_ for _ in ()).throw(ValueError("private response")),
         )
-        with (
-            patch.object(pytesseract.pytesseract, "tesseract_cmd", "tesseract"),
-            patch.object(pytesseract, "get_tesseract_version"),
-            patch.object(pytesseract, "get_languages", return_value=["osd"]),
-            self.assertRaisesRegex(OCRConfigurationError, "English language data"),
-        ):
-            provider(self._sample_ocr_image())
+        with patch("httpx.post", return_value=invalid_json):
+            with self.assertRaisesRegex(OCRSpaceAPIError, "malformed JSON") as caught:
+                provider(self._sample_ocr_image())
+            self.assertNotIn("private response", str(caught.exception))
 
-    def test_installed_tesseract_recognizes_sample_image(self):
-        configured_command = get_settings().tesseract_cmd.strip()
-        if configured_command:
-            executable_available = Path(configured_command).is_file()
-        else:
-            executable_available = shutil.which("tesseract") is not None
-        if not executable_available:
-            self.skipTest("Tesseract is not installed/configured in this environment")
-
-        provider = _default_ocr_provider(
-            test_settings(ocr_provider="tesseract", tesseract_cmd=configured_command)
-        )
-        text = provider(self._sample_ocr_image()).upper()
-        self.assertIn("VPN", text)
-        self.assertIn("691", text)
+    def test_ocr_space_requires_key_and_reports_oversized_images(self):
+        with self.assertRaisesRegex(OCRConfigurationError, "OCR_SPACE_API_KEY"):
+            _default_ocr_provider(test_settings(ocr_provider="ocr_space", ocr_space_api_key=""))
+        with patch("httpx.post") as post:
+            provider = _default_ocr_provider(
+                test_settings(ocr_provider="ocr_space", ocr_space_max_file_bytes=100)
+            )
+            with self.assertRaisesRegex(OCRSpaceAPIError, "file limit"):
+                provider(self._sample_ocr_image())
+            post.assert_not_called()
 
     def test_vision_provider_reuses_and_overrides_openrouter_credentials(self):
         cases = [
